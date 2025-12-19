@@ -545,6 +545,11 @@ class SunoApi {
    * @param continue_clip_id 
    * @returns A promise that resolves to an array of AudioInfo objects representing the generated songs.
    */
+  
+  /**
+   * Generates songs based on the provided parameters.
+   * [Updated for v5 / v2-web endpoint].
+   */
   private async generateSongs(
     prompt: string,
     isCustom: boolean,
@@ -559,53 +564,80 @@ class SunoApi {
     continue_at?: number
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
-    const payload: any = {
-      make_instrumental: make_instrumental,
-      mv: model || DEFAULT_MODEL,
-      prompt: '',
-      generation_type: 'TEXT',
-      continue_at: continue_at,
-      continue_clip_id: continue_clip_id,
-      task: task,
-      token: await this.getCaptcha()
-    };
-    if (isCustom) {
-      payload.tags = tags;
-      payload.title = title;
-      payload.negative_tags = negative_tags;
-      payload.prompt = prompt;
-    } else {
-      payload.gpt_description_prompt = prompt;
+
+    // [v5 Support] model name mapping (chirp-v5-0 -> chirp-crow)
+    let mv = model || DEFAULT_MODEL;
+    if (mv === 'chirp-v5-0' || mv === 'v5') {
+      mv = 'chirp-crow';
     }
+
+    // [v5 Security] create session token, transaction ID
+    const sessionToken = await this.getSessionToken();
+    const transactionId = randomUUID();
+
+    // [v5 Payload] modify construction for v2-web endpoint
+    const payload: any = {
+      token: await this.getCaptcha(),
+      generation_type: 'TEXT',
+      title: title || '',
+      tags: tags || '',
+      negative_tags: negative_tags || '',
+      mv: mv,
+      prompt: prompt,
+      make_instrumental: make_instrumental,
+      user_uploaded_images_b64: null,
+      metadata: {
+        web_client_pathname: '/create',
+        is_max_mode: false,
+        is_mumble: false,
+        create_mode: isCustom ? 'custom' : 'normal',
+        create_session_token: sessionToken, // required
+        disable_volume_normalization: false,
+        can_control_sliders: ["weirdness_constraint", "style_weight"]
+        // exclude user_tier cause it could be optional (if error, need to fix it)
+      },
+      override_fields: [],
+      transaction_uuid: transactionId // 필수
+    };
+
+    // extra parameter for extension task
+    if (task === 'extend') {
+      payload.continue_clip_id = continue_clip_id;
+      payload.continue_at = continue_at;
+      payload.task = task;
+    }
+
     logger.info(
-      'generateSongs payload:\n' +
+      'generateSongs payload (v2-web):\n' +
         JSON.stringify(
           {
+            model: mv,
             prompt: prompt,
-            isCustom: isCustom,
             tags: tags,
             title: title,
-            make_instrumental: make_instrumental,
-            wait_audio: wait_audio,
-            negative_tags: negative_tags,
             payload: payload
           },
           null,
           2
         )
     );
+
+    // [v5 Endpoint] send to /api/generate/v2-web/
     const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/v2/`,
+      `${SunoApi.BASE_URL}/api/generate/v2-web/`,
       payload,
       {
-        timeout: 10000 // 10 seconds timeout
+        timeout: 10000 
       }
     );
+
     if (response.status !== 200) {
       throw new Error('Error response:' + response.statusText);
     }
+
     const songIds = response.data.clips.map((audio: any) => audio.id);
-    //Want to wait for music file generation
+
+    // Wait logic (same as before)
     if (wait_audio) {
       const startTime = Date.now();
       let lastResponse: AudioInfo[] = [];
