@@ -2,7 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import UserAgent from 'user-agents';
 import pino from 'pino';
 import yn from 'yn';
-import { isPage, sleep, waitForRequests } from '@/lib/utils';
+import { base64ToFile, isPage, sleep, waitForRequests } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
 import { Solver } from '@2captcha/captcha-solver';
@@ -18,7 +18,8 @@ const cache = globalForSunoApi.sunoApiCache || new Map<string, SunoApi>();
 globalForSunoApi.sunoApiCache = cache;
 
 const logger = pino();
-export const DEFAULT_MODEL = 'chirp-v3-5';
+// export const DEFAULT_MODEL = 'chirp-v3-5';
+export const DEFAULT_MODEL = 'chirp-auk-turbo';
 
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
@@ -81,7 +82,7 @@ class SunoApi {
   private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
   private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
   private cursor?: Cursor;
-
+  
   constructor(cookies: string) {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
     this.cookies = cookie.parse(cookies);
@@ -100,7 +101,8 @@ class SunoApi {
       }
     });
     this.client.interceptors.request.use(config => {
-      if (this.currentToken && !config.headers.Authorization)
+      // 请求链接包含suno.com时，添加Authorization头
+      if (config.url?.includes('suno.com') && this.currentToken && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
       const cookiesArray = Object.entries(this.cookies).map(([key, value]) => 
         cookie.serialize(key, value as string)
@@ -153,9 +155,10 @@ class SunoApi {
     logger.info('Getting the session ID');
     // URL to get session ID
     const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    // console.error(getSessionUrl, this.cookies.__client,"99999");
     // Get session ID
     const sessionResponse = await this.client.get(getSessionUrl, {
-      headers: { Authorization: this.cookies.__client }
+       headers: { Authorization: this.cookies.__client }
     });
     if (!sessionResponse?.data?.response?.last_active_session_id) {
       console.error("Session Error Response:", JSON.stringify(sessionResponse.data));
@@ -165,6 +168,7 @@ class SunoApi {
     }
     // Save session ID for later use
     this.sid = sessionResponse.data.response.last_active_session_id;
+    this.currentToken = sessionResponse.data.response.last_active_session_jwt;
   }
 
   /**
@@ -182,6 +186,8 @@ class SunoApi {
     const renewResponse = await this.client.post(renewUrl, {}, {
       headers: { Authorization: this.cookies.__client }
     });
+
+    // logger.info('Renew Response:\n' + JSON.stringify(renewResponse.data, null, 2));
     if (isWait) {
       await sleep(1, 2);
     }
@@ -450,9 +456,12 @@ class SunoApi {
     prompt: string,
     make_instrumental: boolean = false,
     model?: string,
-    wait_audio: boolean = false
+    wait_audio: boolean = false,
+    cover_clip_id?:string,
   ): Promise<AudioInfo[]> {
     await this.keepAlive(false);
+    let task = '';
+    if (cover_clip_id) task = 'cover';
     const startTime = Date.now();
     const audios = await this.generateSongs(
       prompt,
@@ -461,7 +470,12 @@ class SunoApi {
       undefined,
       make_instrumental,
       model,
-      wait_audio
+      wait_audio,
+      '',
+      task,
+      '',
+      0,
+      cover_clip_id
     );
     const costTime = Date.now() - startTime;
     logger.info('Generate Response:\n' + JSON.stringify(audios, null, 2));
@@ -504,24 +518,34 @@ class SunoApi {
    * @returns A promise that resolves to an array of AudioInfo objects representing the generated audios.
    */
   public async custom_generate(
-    prompt: string,
-    tags: string,
-    title: string,
-    make_instrumental: boolean = false,
-    model?: string,
-    wait_audio: boolean = false,
-    negative_tags?: string
+    prompt: string, // 自定义模式下只有歌词，没有描述
+    tags: string, // 音乐风格标签
+    title: string, // 音乐标题
+    make_instrumental: boolean = false, // 是否为纯音乐
+    model?: string, // 模型
+    wait_audio: boolean = false, 
+    negative_tags?: string, // 负面标签
+    cover_clip_id?: string, // 参照的音频ID
+    vocal_gender?: string // 人声性别
   ): Promise<AudioInfo[]> {
+    let task = '';
+    if (cover_clip_id) task = "cover";
     const startTime = Date.now();
     const audios = await this.generateSongs(
-      prompt,
+      "",
       true,
       tags,
       title,
       make_instrumental,
       model,
       wait_audio,
-      negative_tags
+      negative_tags,
+      task, 
+      '',
+      0,
+      cover_clip_id,
+      prompt,
+      vocal_gender
     );
     const costTime = Date.now() - startTime;
     logger.info(
@@ -545,7 +569,7 @@ class SunoApi {
    * @param continue_clip_id 
    * @returns A promise that resolves to an array of AudioInfo objects representing the generated songs.
    */
-  
+
   /**
    * Generates songs based on the provided parameters.
    * [Updated for v5 / v2-web endpoint].
@@ -561,7 +585,10 @@ class SunoApi {
     negative_tags?: string,
     task?: string,
     continue_clip_id?: string,
-    continue_at?: number
+    continue_at?: number,
+    cover_clip_id?: string, // 自定义音乐
+    lyrics_prompt?: string, // 歌词
+    vocal_gender?: string // 人声性别
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
 
@@ -583,18 +610,21 @@ class SunoApi {
       tags: tags || '',
       negative_tags: negative_tags || '',
       mv: mv,
-      prompt: prompt,
+      prompt: lyrics_prompt, // 歌词
+      gpt_description_prompt: prompt,
       make_instrumental: make_instrumental,
       user_uploaded_images_b64: null,
       metadata: {
         web_client_pathname: '/create',
         is_max_mode: false,
+        create_mode: isCustom ? 'custom' : 'simple',
         is_mumble: false,
-        create_mode: isCustom ? 'custom' : 'normal',
         create_session_token: sessionToken, // required
         disable_volume_normalization: false,
-        can_control_sliders: ["weirdness_constraint", "style_weight"]
+        can_control_sliders: ["weirdness_constraint", "style_weight"],
         // exclude user_tier cause it could be optional (if error, need to fix it)
+        lyrics_model:'default',
+        vocal_gender:vocal_gender
       },
       override_fields: [],
       transaction_uuid: transactionId // 필수
@@ -604,6 +634,9 @@ class SunoApi {
     if (task === 'extend') {
       payload.continue_clip_id = continue_clip_id;
       payload.continue_at = continue_at;
+      payload.task = task;
+    } else if (task === 'cover') {
+      payload.cover_clip_id = cover_clip_id;
       payload.task = task;
     }
 
@@ -880,6 +913,94 @@ class SunoApi {
 
     return response.data;
   }
+
+  // --------------------------- upload mp3 file ---------------------------
+  // 检查上传结果
+  private async getUploadFileResult(fileKey: string): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.get(
+      `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/`
+    )
+    if (response.status == 200 && response.data.status == 'complete') {
+      return {status: 'complete', audioUrl: response.data.audio_url};
+    }
+    return {status: 'pending'};
+  }
+
+  // 上传文件到Aws
+  // form 表单数据上传，接收二进制文件
+  public async uploadFileToAws(base64File: string, fileName: string, fileType: string): Promise<any> {
+    const awsInfoResponse = await this.client.post(
+      `https://studio-api.prod.suno.com/api/uploads/audio/`,
+      {
+        extension: fileType
+      }
+    );
+    if (awsInfoResponse.status != 200) {
+      throw new Error('Error response status:' + awsInfoResponse.status);
+    }
+    const uploadInfo = awsInfoResponse.data;
+
+    // 上传到 aws
+    const field = uploadInfo.fields;
+    const form = new FormData();
+    form.append('Content-Type', field['Content-Type']);
+    form.append('key', field.key);
+    form.append('AWSAccessKeyId', field.AWSAccessKeyId);
+    form.append('policy', field.policy);
+    form.append('signature', field.signature);
+      
+    const fileTemp = base64ToFile(base64File, fileName, field['Content-Type']);
+    form.append('file', fileTemp);
+    const awsResponse = await this.client.post(
+      uploadInfo.url,
+      form
+    );
+    if (awsResponse.status != 204) {
+      throw new Error('Error response status:' + awsResponse.status);
+    }
+    
+    // 请求到 suno
+    let fileKey = field.key.split('/')[1]
+    fileKey = fileKey.split('.')[0]; // 去掉后缀
+    const url = `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/upload-finish/`;
+    const response = await this.client.post(
+      url,
+      {upload_type:"file_upload",upload_filename:fileName}
+    );
+    if (response.status != 200) {
+      throw new Error('Error response status:' + response.status);
+    }
+
+    // 轮询结果
+    let uploadResult = await this.getUploadFileResult(fileKey);
+    const startTime = Date.now();
+    while (uploadResult.status == 'pending' && (Date.now() - startTime) < 60000) { // 最多等1分钟
+      await sleep(3, 6);
+      uploadResult = await this.getUploadFileResult(fileKey);
+    }
+    if (uploadResult.status != 'complete') {
+      throw new Error('Upload file processing timeout or failed');
+    }
+
+    // initialize 生成clip id
+    const initResponse = await this.client.post(
+      `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/initialize-clip/`,
+      {}
+    );
+    if (initResponse.status != 200) {
+      throw new Error('Error response status:' + initResponse.status);
+    }
+
+    // 返回key
+    return { 
+      clip_id: initResponse.data.clip_id,
+      file_name: fileName,
+      file_type: fileType
+    }; 
+  }
+
+  // -------------------- 上传文件结束--------------------
 }
 
 export const sunoApi = async (cookie?: string) => {

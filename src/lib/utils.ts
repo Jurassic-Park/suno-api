@@ -116,3 +116,15 @@ export const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 }
+
+/* 将 Base64 转换为 File 对象
+ * @param base64 - Base64 字符串（可能包含前缀，如 "data:image/png;base64,"）
+ * @param filename - 文件名
+ * @param mimeType - 文件类型，例如 'image/png'
+ */
+export const base64ToFile = (base64: string, filename: string, mimeType: string): File => {
+  const base64Data = base64.split(',')[1] || base64;
+  const buffer = Buffer.from(base64Data, 'base64');
+  const file = new File([buffer], filename, { type: mimeType });
+  return file;
+}
