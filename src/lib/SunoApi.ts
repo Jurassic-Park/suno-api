@@ -459,6 +459,7 @@ class SunoApi {
     wait_audio: boolean = false,
     cover_clip_id?:string,
   ): Promise<AudioInfo[]> {
+    logger.info('Generate called with prompt: ' + prompt);
     await this.keepAlive(false);
     let task = '';
     if (cover_clip_id) task = 'cover';
@@ -590,6 +591,8 @@ class SunoApi {
     lyrics_prompt?: string, // 歌词
     vocal_gender?: string // 人声性别
   ): Promise<AudioInfo[]> {
+    logger.info('generateSongs called with prompt: ' + prompt);
+
     await this.keepAlive();
 
     // [v5 Support] model name mapping (chirp-v5-0 -> chirp-crow)
