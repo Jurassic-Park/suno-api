@@ -476,7 +476,9 @@ class SunoApi {
       task,
       '',
       0,
-      cover_clip_id
+      cover_clip_id,
+      '',
+      '',
     );
     const costTime = Date.now() - startTime;
     logger.info('Generate Response:\n' + JSON.stringify(audios, null, 2));
