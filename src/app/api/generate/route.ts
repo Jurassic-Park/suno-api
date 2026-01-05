@@ -2,7 +2,9 @@ import { NextResponse, NextRequest } from "next/server";
 import { cookies } from 'next/headers'
 import { DEFAULT_MODEL, sunoApi } from "@/lib/SunoApi";
 import { corsHeaders } from "@/lib/utils";
+import pino from 'pino';
 
+const logger = pino();
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
@@ -37,7 +39,44 @@ export async function POST(req: NextRequest) {
           }
         });
       }
-      return new NextResponse(JSON.stringify({ error: 'Internal server error: ' + JSON.stringify(error.response.data.detail) }), {
+
+      if (error.message?.includes('CAPTCHA')) {
+        return new NextResponse(JSON.stringify({
+          error: 'CAPTCHA verification failed',
+          code: 'CAPTCHA_FAILED',
+          details: error.message
+        }), {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders
+          }
+        });
+      }
+
+      // Browser/automation related errors
+      if (error.message?.includes('browser') || error.message?.includes('chrome') || error.message?.includes('executable')) {
+        return new NextResponse(JSON.stringify({
+          error: 'Browser automation error',
+          code: 'BROWSER_ERROR',
+          details: error.message
+        }), {
+          status: 500,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders
+          }
+        });
+      }
+
+      // Generic error response
+      return new NextResponse(JSON.stringify({
+        error: 'Internal server error',
+        code: 'INTERNAL_ERROR',
+        details: error.message || 'Unknown error occurred',
+        errorObject: JSON.stringify(error, Object.getOwnPropertyNames(error))
+      }), {
+
         status: 500,
         headers: {
           'Content-Type': 'application/json',

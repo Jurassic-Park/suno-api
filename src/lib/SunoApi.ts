@@ -6,14 +6,20 @@ import { base64ToFile, isPage, sleep, waitForRequests } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
 import { Solver } from '@2captcha/captcha-solver';
+import chromium from '@sparticuz/chromium';
 import { paramsCoordinates } from '@2captcha/captcha-solver/dist/structs/2captcha';
-import { BrowserContext, Page, Locator, chromium, firefox } from 'rebrowser-playwright-core';
+import type { BrowserContext, Page, Locator } from 'rebrowser-playwright-core';
+import * as playwright from 'rebrowser-playwright-core';
 import { createCursor, Cursor } from 'ghost-cursor-playwright';
 import { promises as fs } from 'fs';
 import path from 'node:path';
+import uniq from 'lodash.uniq';
 
 // sunoApi instance caching
-const globalForSunoApi = global as unknown as { sunoApiCache?: Map<string, SunoApi> };
+const globalForSunoApi = global as unknown as {
+  sunoApiCache?: Map<string, SunoApi>;
+};
+
 const cache = globalForSunoApi.sunoApiCache || new Map<string, SunoApi>();
 globalForSunoApi.sunoApiCache = cache;
 
@@ -77,13 +83,17 @@ class SunoApi {
   private sid?: string;
   private currentToken?: string;
   private deviceId?: string;
+  private isVercel: boolean;
   private userAgent?: string;
   private cookies: Record<string, string | undefined>;
   private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
-  private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
+  private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, {
+    default: false
+  });
   private cursor?: Cursor;
   
   constructor(cookies: string) {
+    this.isVercel = process.env.VERCEL_URL !== undefined;
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
     this.cookies = cookie.parse(cookies);
     this.deviceId = this.cookies.ajs_anonymous_id || randomUUID();
@@ -104,13 +114,13 @@ class SunoApi {
       // 请求链接包含suno.com时，添加Authorization头
       if (config.url?.includes('suno.com') && this.currentToken && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
-      const cookiesArray = Object.entries(this.cookies).map(([key, value]) => 
+      const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
         cookie.serialize(key, value as string)
       );
       config.headers.Cookie = cookiesArray.join('; ');
       return config;
     });
-    this.client.interceptors.response.use(resp => {
+    this.client.interceptors.response.use((resp) => {
       const setCookieHeader = resp.headers['set-cookie'];
       if (Array.isArray(setCookieHeader)) {
         const newCookies = cookie.parse(setCookieHeader.join('; '));
@@ -119,7 +129,7 @@ class SunoApi {
         }
       }
       return resp;
-    })
+    });
   }
 
   public async init(): Promise<SunoApi> {
@@ -180,7 +190,8 @@ class SunoApi {
       throw new Error('Session ID is not set. Cannot renew token.');
     }
     // URL to renew session token
-    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    // const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
     // Renew session token
     logger.info('KeepAlive...\n');
     const renewResponse = await this.client.post(renewUrl, {}, {
@@ -251,12 +262,9 @@ class SunoApi {
     const browser = process.env.BROWSER?.toLowerCase();
     switch (browser) {
       case 'firefox':
-        return firefox;
-      /*case 'webkit': ** doesn't work with rebrowser-patches
-      case 'safari':
-        return webkit;*/
+        return playwright.firefox;
       default:
-        return chromium;
+        return playwright.chromium;
     }
   }
 
@@ -265,26 +273,52 @@ class SunoApi {
    * @returns {BrowserContext}
    */
   private async launchBrowser(): Promise<BrowserContext> {
-    const args = [
+    let baseArgs = [
       '--disable-blink-features=AutomationControlled',
       '--disable-web-security',
       '--no-sandbox',
       '--disable-dev-shm-usage',
       '--disable-features=site-per-process',
       '--disable-features=IsolateOrigins',
-      '--disable-extensions',
-      '--disable-infobars'
+      '--disable-extensions'
     ];
     // Check for GPU acceleration, as it is recommended to turn it off for Docker
     if (yn(process.env.BROWSER_DISABLE_GPU, { default: false }))
-      args.push('--enable-unsafe-swiftshader',
-        '--disable-gpu',
-        '--disable-setuid-sandbox');
-    const browser = await this.getBrowserType().launch({
-      args,
-      headless: yn(process.env.BROWSER_HEADLESS, { default: true })
+
+    baseArgs.push(
+      '--enable-unsafe-swiftshader',
+      '--disable-gpu',
+      '--disable-setuid-sandbox'
+    );
+
+    logger.info({
+      msg: 'Launching browser',
+      isVercel: this.isVercel,
+      nodeEnv: process.env.NODE_ENV,
+      totalArgs: baseArgs.length
     });
-    const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
+
+    let browser: playwright.Browser;
+
+    if (this.isVercel) {
+      browser = await playwright.chromium.launch({
+        args: uniq([...baseArgs, ...chromium.args]),
+        executablePath: await chromium.executablePath(),
+        headless: true
+      });
+    } else {
+      browser = await this.getBrowserType().launch({
+        args: baseArgs,
+        headless: yn(process.env.BROWSER_HEADLESS, { default: true })
+      });
+    }
+
+    const context = await browser.newContext({
+      userAgent: this.userAgent,
+      locale: process.env.BROWSER_LOCALE,
+      viewport: null
+    });
+
     const cookies = [];
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
     cookies.push({
@@ -318,7 +352,11 @@ class SunoApi {
     logger.info('CAPTCHA required. Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
-    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
+    await page.goto('https://suno.com/create', {
+      referer: 'https://www.google.com/',
+      waitUntil: 'domcontentloaded',
+      timeout: 0
+    });
 
     logger.info('Waiting for Suno interface to load');
     // await page.locator('.react-aria-GridList').waitFor({ timeout: 60000 });
