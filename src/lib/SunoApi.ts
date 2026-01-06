@@ -75,9 +75,11 @@ interface PersonaResponse {
 }
 
 class SunoApi {
-  private static BASE_URL: string = 'https://studio-api.prod.suno.com';
-  private static CLERK_BASE_URL: string = 'https://auth.suno.com';
-  private static CLERK_VERSION = '5.111.0';
+  // private static BASE_URL: string = 'https://studio-api.prod.suno.com';
+  // private static CLERK_BASE_URL: string = 'https://auth.suno.com';
+  private static BASE_URL: string = 'http://127.0.0.1:8080/suno.com-api';
+  private static CLERK_BASE_URL: string = 'http://127.0.0.1:8080/suno.com-auth-api';
+  private static CLERK_VERSION = '5.117.0';
 
   private readonly client: AxiosInstance;
   private sid?: string;
@@ -112,7 +114,7 @@ class SunoApi {
     });
     this.client.interceptors.request.use(config => {
       // 请求链接包含suno.com时，添加Authorization头
-      if (config.url?.includes('suno.com') && this.currentToken && !config.headers.Authorization)
+      if (config.url?.includes('suno.com') && this.currentToken && this.currentToken != undefined && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
       const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
         cookie.serialize(key, value as string)
@@ -162,6 +164,9 @@ class SunoApi {
    * Get the session ID and save it for later use.
    */
   private async getAuthToken() {
+    // this.sid = "session_b2fcd20cedcd920400959d"
+    // this.currentToken = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdW5vLmNvbS9jbGFpbXMvdXNlcl9pZCI6IjM0N2RhM2FhLWNiYTQtNGU4MS05NjVjLTkzZmQ1NWM2ODg3NyIsImh0dHBzOi8vc3Vuby5haS9jbGFpbXMvY2xlcmtfaWQiOiJ1c2VyXzM2RVpQdEhhellNbzMyRlVFaHVKTnROUDhLdyIsInN1bm8uY29tL2NsYWltcy90b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzY3Njg4MzY5LCJhdWQiOiJzdW5vLWFwaSIsInN1YiI6InVzZXJfMzZFWlB0SGF6WU1vMzJGVUVodUpOdE5QOEt3IiwiYXpwIjoiaHR0cHM6Ly9zdW5vLmNvbSIsImZ2YSI6WzAsLTFdLCJpYXQiOjE3Njc2ODQ3NjksImlzcyI6Imh0dHBzOi8vYXV0aC5zdW5vLmNvbSIsImppdCI6IjNjNWUwMWE4LWExNjMtNGIyMC04ZmEwLWQwOWI1MjE0MzA0MSIsInZpeiI6ZmFsc2UsInNpZCI6InNlc3Npb25fYjJmY2QyMGNlZGNkOTIwNDAwOTU5ZCIsInN1bm8uY29tL2NsYWltcy9lbWFpbCI6IjM0MzY1MTE1MkBxcS5jb20iLCJodHRwczovL3N1bm8uYWkvY2xhaW1zL2VtYWlsIjoiMzQzNjUxMTUyQHFxLmNvbSJ9.qtQMKnmr7sOq4g8CoowJlX12ltD88oSJ6YkDG-LRnBQMuo8Vccnp1k31paC2FCyA0UhbXda8Hq1VI0FJsclDoCy03yupubbXr9J6XNeVdiFv1_801HZxcSrns-hzl5_2ugKCN6877jPGxiuKUNvs2YTceA4RNnFjjeuZR2WHxzCofTk9l1qRnvLiyxOwMjHhSSIQR7Exn9FrqZgxmdN_TDQy3pjXSq6HUQYkbeKRlvulbmtEb_H3eT1zc2gSlSbR3w08bmxYzVwJRsWNw1YCYdNzVM6SFLR7tsyZajjCDuBuR72feJtGjKwugc--WYcPbLVAzzgoT8mHdC7NPJW3vw'
+
     logger.info('Getting the session ID');
     // URL to get session ID
     const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
@@ -178,7 +183,7 @@ class SunoApi {
     }
     // Save session ID for later use
     this.sid = sessionResponse.data.response.last_active_session_id;
-    this.currentToken = sessionResponse.data.response.last_active_session_jwt;
+    this.currentToken = sessionResponse.data.response.sessions[0].last_active_token.jwt;
   }
 
   /**
@@ -190,19 +195,18 @@ class SunoApi {
       throw new Error('Session ID is not set. Cannot renew token.');
     }
     // URL to renew session token
-    // const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
-    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/touch?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
     // Renew session token
-    logger.info('KeepAlive...\n');
+    logger.info('KeepAlive... '+renewUrl+' \n');
     const renewResponse = await this.client.post(renewUrl, {}, {
-      headers: { Authorization: this.cookies.__client }
+      // headers: { Authorization: this.cookies.__client }
     });
 
     // logger.info('Renew Response:\n' + JSON.stringify(renewResponse.data, null, 2));
     if (isWait) {
       await sleep(1, 2);
     }
-    const newToken = renewResponse.data.jwt;
+    const newToken = renewResponse.data.response.last_active_token.jwt;
     // Update Authorization field in request header with the new JWT token
     this.currentToken = newToken;
   }
