@@ -75,10 +75,10 @@ interface PersonaResponse {
 }
 
 class SunoApi {
-  // private static BASE_URL: string = 'https://studio-api.prod.suno.com';
-  // private static CLERK_BASE_URL: string = 'https://auth.suno.com';
-  private static BASE_URL: string = 'http://127.0.0.1:8080/suno.com-api';
-  private static CLERK_BASE_URL: string = 'http://127.0.0.1:8080/suno.com-auth-api';
+  private static BASE_URL: string = 'https://studio-api.prod.suno.com';
+  private static CLERK_BASE_URL: string = 'https://auth.suno.com';
+  // private static BASE_URL: string = 'http://127.0.0.1:8080/suno.com-api';
+  // private static CLERK_BASE_URL: string = 'http://127.0.0.1:8080/suno.com-auth-api';
   private static CLERK_VERSION = '5.117.0';
 
   private readonly client: AxiosInstance;
