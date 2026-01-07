@@ -659,7 +659,7 @@ class SunoApi {
       negative_tags: negative_tags || '',
       mv: mv,
       prompt: lyrics_prompt, // 歌词
-      gpt_description_prompt: prompt,
+      // gpt_description_prompt: prompt,
       make_instrumental: make_instrumental,
       user_uploaded_images_b64: null,
       metadata: {
@@ -671,10 +671,27 @@ class SunoApi {
         disable_volume_normalization: false,
         can_control_sliders: ["weirdness_constraint", "style_weight"],
         // exclude user_tier cause it could be optional (if error, need to fix it)
-        lyrics_model:'default',
-        vocal_gender:vocal_gender
+        vocal_gender:vocal_gender,
+        last_lyrics_generation: {
+            title: "",
+            lyrics: "",
+            prompt: "",
+            lyrics_model: "default"
+        }
       },
       override_fields: [],
+
+      cover_clip_id: null,
+      cover_start_s: null,
+      cover_end_s: null,
+      persona_id: null,
+      artist_clip_id: null,
+      artist_start_s: null,
+      artist_end_s: null,
+      continue_clip_id: null,
+      continued_aligned_prompt: null,
+      continue_at: null,
+
       transaction_uuid: transactionId // 필수
     };
 
@@ -765,26 +782,58 @@ class SunoApi {
    */
   public async generateLyrics(prompt: string): Promise<string> {
     await this.keepAlive(false);
+    const sessionToken = await this.getSessionToken();
     // Initiate lyrics generation
     const generateResponse = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/lyrics/`,
-      { prompt }
+      `${SunoApi.BASE_URL}/api/generate/lyrics-pair`,
+      { 
+        create_session_token : sessionToken,
+        lyrics_model : "default",
+        prompt : prompt, 
+        source : "create_ui"
+      }
     );
-    const generateId = generateResponse.data.id;
+    const generateIda = generateResponse.data.lyrics_a_id;
+    // const generateIdb = generateResponse.data.lyrics_b_id;
 
     // Poll for lyrics completion
     let lyricsResponse = await this.client.get(
-      `${SunoApi.BASE_URL}/api/generate/lyrics/${generateId}`
+      `${SunoApi.BASE_URL}/api/generate/lyrics/${generateIda}`
     );
     while (lyricsResponse?.data?.status !== 'complete') {
       await sleep(2); // Wait for 2 seconds before polling again
       lyricsResponse = await this.client.get(
-        `${SunoApi.BASE_URL}/api/generate/lyrics/${generateId}`
+        `${SunoApi.BASE_URL}/api/generate/lyrics/${generateIda}`
       );
     }
 
     // Return the generated lyrics text
     return lyricsResponse.data;
+  }
+
+  /**
+   * edit lyrics based on a given prompt.
+   * @param prompt The prompt for generating lyrics.
+   * @returns The generated lyrics text.
+   */
+  public async editLyrics(title: string, prompt: string, lyrics: string): Promise<string> {
+    await this.keepAlive(false);
+    const sessionToken = await this.getSessionToken();
+    // Initiate lyrics generation
+    const generateResponse = await this.client.post(
+      `${SunoApi.BASE_URL}/api/generate/lyrics-infill/`,
+      { 
+        context_lyrics_edit : lyrics,
+        context_lyrics_prefix : '',
+        context_lyrics_suffix : '',
+        create_session_token : sessionToken,
+        prompt : prompt, 
+        title :title 
+      }
+    );
+
+    // Return the generated lyrics text
+    return generateResponse.data;
   }
 
   /**
@@ -979,7 +1028,7 @@ class SunoApi {
   // form 表单数据上传，接收二进制文件
   public async uploadFileToAws(base64File: string, fileName: string, fileType: string): Promise<any> {
     const awsInfoResponse = await this.client.post(
-      `https://studio-api.prod.suno.com/api/uploads/audio/`,
+      `${SunoApi.BASE_URL}/api/uploads/audio/`,
       {
         extension: fileType
       }
@@ -1049,6 +1098,7 @@ class SunoApi {
   }
 
   // -------------------- 上传文件结束--------------------
+
 }
 
 export const sunoApi = async (cookie?: string) => {
