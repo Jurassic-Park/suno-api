@@ -350,6 +350,7 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
+    return null;
     if (!await this.captchaRequired())
       return null;
 
