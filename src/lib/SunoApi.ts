@@ -350,7 +350,6 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
-    return null;
     if (!await this.captchaRequired())
       return null;
 
@@ -462,7 +461,7 @@ class SunoApi {
       throw e;
     });
     return (new Promise((resolve, reject) => {
-      page.route('**/api/generate/v2/**', async (route: any) => {
+      page.route('**/api/generate/v2-web/**', async (route: any) => {
         try {
           logger.info('hCaptcha token received. Closing browser');
           route.abort();

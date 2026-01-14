@@ -1,18 +1,18 @@
-# syntax=docker/dockerfile:1 
+# syntax=docker/dockerfile:1.4 
                                                                                                                                                                                                     
 FROM node:lts-bookworm AS builder         
 
-RUN npm install -g pnpm
+#RUN npm install -g pnpm
 
 WORKDIR /src                                                                                                            
 COPY package*.json ./                                                                                                   
-RUN pnpm install                                                                                                         
+RUN npm install                                                                                                         
 COPY . .                                                                                                               
-RUN pnpm run build                                                                                                       
+RUN npm run build                                                                                                       
                                                                                                                     
 FROM node:lts-bookworm       
 
-RUN npm install -g pnpm
+# RUN npm install -g pnpm
 
 WORKDIR /app                                                                                                            
 COPY package*.json ./                                                                                                   
@@ -27,12 +27,12 @@ ENV SUNO_COOKIE=${SUNO_COOKIE}
 # Disable GPU acceleration, as with it suno-api won't work in a Docker environment
 ENV BROWSER_DISABLE_GPU=true
 
-RUN pnpm install --only=production                                                                                       
+RUN npm install --only=production                                                                                       
                                                                                                                     
 # Install all supported browsers, else switching browsers requires an image rebuild                                     
-RUN pnpx rebrowser-playwright-core install chromium                                                                                    
+RUN npx rebrowser-playwright-core install chromium                                                                                    
 # RUN npx playwright install firefox                                                                                     
                                                                                                                     
 COPY --from=builder /src/.next ./.next                                                                                  
 EXPOSE 3000                                                                                                             
-CMD ["pnpm", "run", "start"]
+CMD ["npm", "run", "start"]
