@@ -1,26 +1,23 @@
 import { NextResponse, NextRequest } from "next/server";
-import { cookies } from 'next/headers';
+import { cookies } from 'next/headers'
 import { DEFAULT_MODEL, sunoApi } from "@/lib/SunoApi";
 import { corsHeaders } from "@/lib/utils";
 
-export const maxDuration = 60; // allow longer timeout for wait_audio == true
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   if (req.method === 'POST') {
     try {
       const body = await req.json();
-      const { prompt, tags, title, make_instrumental, model, wait_audio, negative_tags, cover_clip_id, vocal_gender } = body;
-      const audioInfo = await (await sunoApi((await cookies()).toString())).custom_generate(
-        prompt, tags, title,
-        Boolean(make_instrumental),
-        model || DEFAULT_MODEL,
-        Boolean(wait_audio),
-        negative_tags,
-        cover_clip_id,
-        vocal_gender
+      const { base64_file, file_name, file_type } = body;
+
+      const uploadInfo = await (await sunoApi((await cookies()).toString())).uploadFileToAws(
+        base64_file,
+        file_name,
+        file_type
       );
-      return new NextResponse(JSON.stringify(audioInfo), {
+
+      return new NextResponse(JSON.stringify(uploadInfo), {
         status: 200,
         headers: {
           'Content-Type': 'application/json',
@@ -28,9 +25,18 @@ export async function POST(req: NextRequest) {
         }
       });
     } catch (error: any) {
-      console.error('Error generating custom audio:', error);
-      return new NextResponse(JSON.stringify({ error: error.response?.data?.detail || error.toString() }), {
-        status: error.response?.status || 500,
+      console.error('Error upload:', error);
+      if (error.response.status === 402) {
+        return new NextResponse(JSON.stringify({ error: error.response.data.detail }), {
+          status: 402,
+          headers: {
+            'Content-Type': 'application/json',
+            ...corsHeaders
+          }
+        });
+      }
+      return new NextResponse(JSON.stringify({ error: 'Internal server error: ' + JSON.stringify(error.response.data.detail) }), {
+        status: 500,
         headers: {
           'Content-Type': 'application/json',
           ...corsHeaders
@@ -47,6 +53,7 @@ export async function POST(req: NextRequest) {
     });
   }
 }
+
 
 export async function OPTIONS(request: Request) {
   return new Response(null, {

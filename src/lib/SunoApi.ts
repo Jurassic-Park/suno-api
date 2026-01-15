@@ -2,7 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import UserAgent from 'user-agents';
 import pino from 'pino';
 import yn from 'yn';
-import { isPage, sleep, waitForRequests } from '@/lib/utils';
+import { base64ToFile, isPage, sleep, waitForRequests } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
 import { Solver } from '@2captcha/captcha-solver';
@@ -1207,9 +1207,10 @@ class SunoApi {
     make_instrumental: boolean = false,
     model?: string,
     wait_audio: boolean = false,
-    negative_tags?: string
+    negative_tags?: string,
+    cover_clip_id?: string, // 参照的音频ID
+    vocal_gender?: string // 人声性别
   ): Promise<AudioInfo[]> {
-    console.log("999999999999");
     validateRequiredString(prompt, 'prompt');
     validateRequiredString(tags, 'tags');
     validateRequiredString(title, 'title');
@@ -1259,16 +1260,22 @@ class SunoApi {
     negative_tags?: string,
     task?: string,
     continue_clip_id?: string,
-    continue_at?: number
+    continue_at?: number,
+    cover_clip_id?: string, // 自定义音乐
+    vocal_gender?: string // 人声性别
   ): Promise<AudioInfo[]> {
     // Validate task parameter if provided
     validateOptionalString(task, 'task');
     validateOptionalString(continue_clip_id, 'continue_clip_id');
     validateOptionalNumber(continue_at, 'continue_at');
+    validateOptionalString(cover_clip_id, 'cover_clip_id');
+    validateOptionalString(vocal_gender, 'vocal_gender');
 
     // If task is 'extend', validate required parameters
     if (task === 'extend') {
       validateRequiredString(continue_clip_id, 'continue_clip_id (required when task is "extend")');
+    } else if (task === 'cover') {
+      validateRequiredString(cover_clip_id, 'cover_clip_id (required when task is "cover")');
     }
 
     await this.keepAlive();
@@ -1690,6 +1697,127 @@ class SunoApi {
 
     return response.data;
   }
+
+  // --------------------------- upload mp3 file ---------------------------
+  // 检查上传结果
+  private async getUploadFileResult(fileKey: string): Promise<any> {
+    await this.keepAlive(false);
+    const response = await this.client.get(
+      `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/`
+    )
+    if (response.status == 200 && response.data.status == 'complete') {
+      return {status: 'complete', audioUrl: response.data.audio_url};
+    }
+    return {status: 'pending'};
+  }
+
+  // 上传文件到Aws
+  // form 表单数据上传，接收二进制文件
+  public async uploadFileToAws(base64File: string, fileName: string, fileType: string): Promise<any> {
+    validateRequiredString(base64File, 'base64File');
+    validateRequiredString(fileName, 'fileName');
+    validateRequiredString(fileType, 'fileType');
+
+    const awsInfoResponse = await this.client.post(
+      `${SunoApi.BASE_URL}/api/uploads/audio/`,
+      {
+        extension: fileType
+      }
+    );
+    if (awsInfoResponse.status != 200) {
+      throw new Error('Error response status:' + awsInfoResponse.status);
+    }
+    const uploadInfo = awsInfoResponse.data;
+
+    // 上传到 aws
+    const field = uploadInfo.fields;
+    const form = new FormData();
+    form.append('Content-Type', field['Content-Type']);
+    form.append('key', field.key);
+    form.append('AWSAccessKeyId', field.AWSAccessKeyId);
+    form.append('policy', field.policy);
+    form.append('signature', field.signature);
+      
+    const fileTemp = base64ToFile(base64File, fileName, field['Content-Type']);
+    form.append('file', fileTemp);
+    const awsResponse = await this.client.post(
+      uploadInfo.url,
+      form
+    );
+    if (awsResponse.status != 204) {
+      throw new Error('Error response status:' + awsResponse.status);
+    }
+    
+    // 请求到 suno
+    let fileKey = field.key.split('/')[1]
+    fileKey = fileKey.split('.')[0]; // 去掉后缀
+    const url = `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/upload-finish/`;
+    const response = await this.client.post(
+      url,
+      {upload_type:"file_upload",upload_filename:fileName}
+    );
+    if (response.status != 200) {
+      throw new Error('Error response status:' + response.status);
+    }
+
+    // 轮询结果
+    let uploadResult = await this.getUploadFileResult(fileKey);
+    const startTime = Date.now();
+    while (uploadResult.status == 'pending' && (Date.now() - startTime) < 60000) { // 最多等1分钟
+      await sleep(3, 6);
+      uploadResult = await this.getUploadFileResult(fileKey);
+    }
+    if (uploadResult.status != 'complete') {
+      throw new Error('Upload file processing timeout or failed');
+    }
+
+    // initialize 生成clip id
+    const initResponse = await this.client.post(
+      `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/initialize-clip/`,
+      {}
+    );
+    if (initResponse.status != 200) {
+      throw new Error('Error response status:' + initResponse.status);
+    }
+
+    // 返回key
+    return { 
+      clip_id: initResponse.data.clip_id,
+      file_name: fileName,
+      file_type: fileType
+    }; 
+  }
+
+  // -------------------- 上传文件结束--------------------
+
+  /**
+   * edit lyrics based on a given prompt.
+   * @param prompt The prompt for generating lyrics.
+   * @returns The generated lyrics text.
+   */
+  public async editLyrics(title: string, prompt: string, lyrics: string): Promise<string> {
+    validateRequiredString(title, 'title');
+    validateRequiredString(prompt, 'prompt');
+
+    await this.keepAlive(false);
+    const sessionToken = await this.getSessionToken();
+    // Initiate lyrics generation
+    const generateResponse = await this.client.post(
+      `${SunoApi.BASE_URL}/api/generate/lyrics-infill/`,
+      { 
+        context_lyrics_edit : lyrics,
+        context_lyrics_prefix : '',
+        context_lyrics_suffix : '',
+        create_session_token : sessionToken,
+        prompt : prompt, 
+        title :title 
+      }
+    );
+
+    // Return the generated lyrics text
+    return generateResponse.data;
+  }
+
 }
 
 /**
