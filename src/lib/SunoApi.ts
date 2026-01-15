@@ -1212,7 +1212,7 @@ class SunoApi {
     vocal_gender?: string // 人声性别
   ): Promise<AudioInfo[]> {
     validateRequiredString(prompt, 'prompt');
-    validateRequiredString(tags, 'tags');
+    // validateRequiredString(tags, 'tags');
     validateRequiredString(title, 'title');
     validateOptionalString(model, 'model');
     validateOptionalString(negative_tags, 'negative_tags');
