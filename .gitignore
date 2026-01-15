@@ -37,3 +37,13 @@ yarn-error.log*
 next-env.d.ts
 
 .idea
+
+# Private documentation
+RESUME_DOCUMENTATION.md
+CHANGES_SUMMARY.md
+
+# CCPM and Claude Code configuration
+ccpm/
+.claude/
+install-ccpm.sh
+CLAUDE.md

@@ -3,21 +3,20 @@ import { cookies } from 'next/headers';
 import { DEFAULT_MODEL, sunoApi } from "@/lib/SunoApi";
 import { corsHeaders } from "@/lib/utils";
 
+export const maxDuration = 60; // allow longer timeout for wait_audio == true
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   if (req.method === 'POST') {
     try {
       const body = await req.json();
-      const { prompt, tags, title, make_instrumental, model, wait_audio, negative_tags, cover_clip_id, vocal_gender } = body;
+      const { prompt, tags, title, make_instrumental, model, wait_audio, negative_tags } = body;
       const audioInfo = await (await sunoApi((await cookies()).toString())).custom_generate(
         prompt, tags, title,
         Boolean(make_instrumental),
         model || DEFAULT_MODEL,
         Boolean(wait_audio),
-        negative_tags,
-        cover_clip_id,
-        vocal_gender
+        negative_tags
       );
       return new NextResponse(JSON.stringify(audioInfo), {
         status: 200,

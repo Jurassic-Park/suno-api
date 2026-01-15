@@ -2,31 +2,239 @@ import axios, { AxiosInstance } from 'axios';
 import UserAgent from 'user-agents';
 import pino from 'pino';
 import yn from 'yn';
-import { base64ToFile, isPage, sleep, waitForRequests } from '@/lib/utils';
+import { isPage, sleep, waitForRequests } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
 import { Solver } from '@2captcha/captcha-solver';
-import chromium from '@sparticuz/chromium';
 import { paramsCoordinates } from '@2captcha/captcha-solver/dist/structs/2captcha';
-import type { BrowserContext, Page, Locator } from 'rebrowser-playwright-core';
-import * as playwright from 'rebrowser-playwright-core';
+import { BrowserContext, Page, Locator, chromium, firefox } from 'rebrowser-playwright-core';
 import { createCursor, Cursor } from 'ghost-cursor-playwright';
 import { promises as fs } from 'fs';
 import path from 'node:path';
-import uniq from 'lodash.uniq';
 
 // sunoApi instance caching
-const globalForSunoApi = global as unknown as {
-  sunoApiCache?: Map<string, SunoApi>;
-};
-
+const globalForSunoApi = global as unknown as { sunoApiCache?: Map<string, SunoApi> };
 const cache = globalForSunoApi.sunoApiCache || new Map<string, SunoApi>();
 globalForSunoApi.sunoApiCache = cache;
 
 const logger = pino();
-// export const DEFAULT_MODEL = 'chirp-v3-5';
-export const DEFAULT_MODEL = 'chirp-auk-turbo';
+export const DEFAULT_MODEL = 'chirp-crow'; // v5 (newest)
 
+/**
+ * Utility function to ensure error objects are proper Error instances
+ * @param error - Unknown error value that may not be an Error object
+ * @returns A proper Error instance
+ */
+function toError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+
+  if (typeof error === 'string') {
+    return new Error(error);
+  }
+
+  if (error && typeof error === 'object' && 'message' in error) {
+    return new Error(String(error.message));
+  }
+
+  return new Error('Unknown error occurred');
+}
+
+/**
+ * Validates that a parameter is a non-empty string
+ * @param value - The value to validate
+ * @param paramName - Name of the parameter for error messages
+ * @throws Error if validation fails
+ */
+function validateRequiredString(value: unknown, paramName: string): asserts value is string {
+  if (typeof value !== 'string') {
+    throw new Error(`Invalid parameter '${paramName}': expected string, got ${typeof value}`);
+  }
+  if (value.trim().length === 0) {
+    throw new Error(`Invalid parameter '${paramName}': must not be empty`);
+  }
+}
+
+/**
+ * Validates that a parameter is a string or null
+ * @param value - The value to validate
+ * @param paramName - Name of the parameter for error messages
+ * @throws Error if validation fails
+ */
+function validateOptionalString(value: unknown, paramName: string): asserts value is string | null | undefined {
+  if (value !== null && value !== undefined && typeof value !== 'string') {
+    throw new Error(`Invalid parameter '${paramName}': expected string, null, or undefined, got ${typeof value}`);
+  }
+}
+
+/**
+ * Validates that a parameter is a number
+ * @param value - The value to validate
+ * @param paramName - Name of the parameter for error messages
+ * @throws Error if validation fails
+ */
+function validateNumber(value: unknown, paramName: string): asserts value is number {
+  if (typeof value !== 'number' || isNaN(value)) {
+    throw new Error(`Invalid parameter '${paramName}': expected number, got ${typeof value}`);
+  }
+}
+
+/**
+ * Validates that a parameter is a number or null/undefined
+ * @param value - The value to validate
+ * @param paramName - Name of the parameter for error messages
+ * @throws Error if validation fails
+ */
+function validateOptionalNumber(value: unknown, paramName: string): asserts value is number | null | undefined {
+  if (value !== null && value !== undefined) {
+    if (typeof value !== 'number' || isNaN(value)) {
+      throw new Error(`Invalid parameter '${paramName}': expected number, null, or undefined, got ${typeof value}`);
+    }
+  }
+}
+
+/**
+ * Sanitize sensitive data from log messages and objects
+ * Redacts cookies, tokens, authorization headers, and other sensitive data
+ * @param data - The data to sanitize (string or object)
+ * @returns Sanitized data with sensitive information redacted
+ */
+function sanitize(data: any): any {
+  if (!data) return data;
+
+  // Handle string data
+  if (typeof data === 'string') {
+    // Redact what looks like tokens or cookies (long alphanumeric strings)
+    return data.replace(/([a-zA-Z0-9_-]{20,})/g, (match) => {
+      // Show only first 8 characters for debugging
+      return `${match.substring(0, 8)}...`;
+    });
+  }
+
+  // Handle objects
+  if (typeof data === 'object') {
+    const sanitized: any = Array.isArray(data) ? [] : {};
+
+    for (const key in data) {
+      const lowerKey = key.toLowerCase();
+
+      // Redact known sensitive fields
+      if (lowerKey.includes('cookie') ||
+          lowerKey.includes('token') ||
+          lowerKey.includes('authorization') ||
+          lowerKey.includes('auth') ||
+          lowerKey.includes('key') ||
+          lowerKey.includes('secret')) {
+
+        const value = String(data[key]);
+        // Show prefix for debugging
+        sanitized[key] = value.length > 8 ? `${value.substring(0, 8)}...[REDACTED]` : '[REDACTED]';
+      } else {
+        // Recursively sanitize nested objects
+        sanitized[key] = sanitize(data[key]);
+      }
+    }
+
+    return sanitized;
+  }
+
+  return data;
+}
+
+/**
+ * Validate required environment variables at startup
+ * @throws Error if required environment variables are missing or invalid
+ */
+function validateEnvironment(): void {
+  const requiredVars = {
+    SUNO_COOKIE: process.env.SUNO_COOKIE,
+    TWOCAPTCHA_KEY: process.env.TWOCAPTCHA_KEY
+  };
+
+  const missing: string[] = [];
+  const invalid: string[] = [];
+
+  for (const [name, value] of Object.entries(requiredVars)) {
+    if (!value) {
+      missing.push(name);
+    } else if (typeof value !== 'string' || value.trim().length === 0) {
+      invalid.push(name);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required environment variables: ${missing.join(', ')}. Please set these variables in your .env file or environment.`
+    );
+  }
+
+  if (invalid.length > 0) {
+    throw new Error(
+      `Invalid environment variables (empty or whitespace): ${invalid.join(', ')}`
+    );
+  }
+
+  logger.info('Environment validation passed', {
+    variables: Object.keys(requiredVars)
+  });
+}
+
+/**
+ * Metadata associated with an audio clip
+ */
+export interface ClipMetadata {
+  gpt_description_prompt?: string;
+  prompt?: string;
+  type?: string;
+  tags?: string;
+  negative_tags?: string;
+  duration?: string;
+  error_message?: string;
+  stem_from_id?: string;
+  concat_history?: Array<{
+    clip_id: string;
+    continue_at: number;
+  }>;
+  history?: Array<{
+    id: string;
+    continue_at?: number;
+    type: string;
+    source?: string;
+  }>;
+}
+
+/**
+ * Represents a complete audio clip with all its associated information
+ */
+export interface ClipInfo {
+  id: string;
+  title?: string;
+  image_url?: string;
+  image_large_url?: string;
+  is_video_pending: boolean;
+  major_model_version: string;
+  model_name: string;
+  metadata: ClipMetadata;
+  is_liked: boolean;
+  user_id: string;
+  display_name?: string;
+  handle?: string;
+  is_handle_updated: boolean;
+  avatar_image_url?: string;
+  is_trashed: boolean;
+  created_at: string;
+  status: 'submitted' | 'queued' | 'streaming' | 'complete' | 'error';
+  audio_url?: string;
+  video_url?: string;
+  play_count?: number;
+  upvote_count?: number;
+  is_public: boolean;
+}
+
+/**
+ * Simplified audio information returned by API endpoints
+ */
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
   title?: string; // Title of the audio
@@ -44,8 +252,12 @@ export interface AudioInfo {
   negative_tags?: string; // Negative tags of music.
   duration?: string; // Duration of the audio
   error_message?: string; // Error message if any
+  stem_from_id?: string; // Parent clip ID if this is a stem
 }
 
+/**
+ * Response structure for persona-related API calls
+ */
 interface PersonaResponse {
   persona: {
     id: string;
@@ -53,12 +265,12 @@ interface PersonaResponse {
     description: string;
     image_s3_id: string;
     root_clip_id: string;
-    clip: any; // You can define a more specific type if needed
+    clip: ClipInfo; // Full clip information
     user_display_name: string;
     user_handle: string;
     user_image_url: string;
     persona_clips: Array<{
-      clip: any; // You can define a more specific type if needed
+      clip: ClipInfo; // Full clip information
     }>;
     is_suno_persona: boolean;
     is_trashed: boolean;
@@ -74,28 +286,144 @@ interface PersonaResponse {
   is_following: boolean;
 }
 
+/**
+ * Coordinate data returned from 2Captcha solver
+ */
+interface CaptchaCoordinate {
+  x: number;
+  y: number;
+}
+
+/**
+ * Solution data from 2Captcha
+ */
+interface CaptchaSolution {
+  id: string;
+  data: CaptchaCoordinate[];
+}
+
+/**
+ * Bounding box coordinates for UI elements
+ */
+interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Payload for song generation API request
+ */
+interface GenerateSongsPayload {
+  make_instrumental?: boolean;
+  mv: string; // Model version
+  prompt: string;
+  generation_type: 'TEXT' | 'EXTEND';
+  continue_at?: number;
+  continue_clip_id?: string;
+  task?: string;
+  token: string | null;
+  tags?: string;
+  title?: string;
+  negative_tags?: string;
+  gpt_description_prompt?: string;
+}
+
+/**
+ * API response for clips
+ */
+interface ClipsResponse {
+  clips: ClipInfo[];
+}
+
+/**
+ * Transcribed word with timing information
+ */
+interface TranscribedWord {
+  word: string;
+  start_s: number;
+  end_s: number;
+  success: boolean;
+  p_align: number;
+}
+
 class SunoApi {
   private static BASE_URL: string = 'https://studio-api.prod.suno.com';
   private static CLERK_BASE_URL: string = 'https://auth.suno.com';
-  // private static BASE_URL: string = 'http://127.0.0.1:8080/suno.com-api';
-  // private static CLERK_BASE_URL: string = 'http://127.0.0.1:8080/suno.com-auth-api';
   private static CLERK_VERSION = '5.117.0';
+  private static CLERK_API_VERSION = '2025-11-10';
+
+  /**
+   * Centralized timeout configuration (in milliseconds unless otherwise specified)
+   * All values can be overridden via environment variables
+   */
+  private static readonly TIMEOUTS = {
+    // Browser navigation timeouts
+    /** Timeout for page navigation (0 = unlimited) */
+    PAGE_NAVIGATION: Number(process.env.TIMEOUT_PAGE_NAVIGATION) || 0,
+    /** Timeout for waiting for API response after page load */
+    PAGE_API_RESPONSE: Number(process.env.TIMEOUT_PAGE_API_RESPONSE) || 30000,
+
+    // UI element interaction timeouts
+    /** Timeout for popup close button clicks */
+    POPUP_CLOSE: Number(process.env.TIMEOUT_POPUP_CLOSE) || 2000,
+    /** Timeout for textarea visibility */
+    TEXTAREA_WAIT: Number(process.env.TIMEOUT_TEXTAREA_WAIT) || 3000,
+    /** Timeout for Create button visibility */
+    CREATE_BUTTON_WAIT: Number(process.env.TIMEOUT_CREATE_BUTTON_WAIT) || 5000,
+
+    // CAPTCHA solving timeouts
+    /** Timeout for CAPTCHA challenge screenshot */
+    CAPTCHA_SCREENSHOT: Number(process.env.TIMEOUT_CAPTCHA_SCREENSHOT) || 5000,
+    /** Delay for hCaptcha images to load (seconds, not milliseconds) */
+    CAPTCHA_IMAGE_LOAD_DELAY: Number(process.env.TIMEOUT_CAPTCHA_IMAGE_LOAD) || 3,
+    /** Delay for CAPTCHA piece to unlock during drag operation (seconds) */
+    CAPTCHA_PIECE_UNLOCK_DELAY: Number(process.env.TIMEOUT_CAPTCHA_PIECE_UNLOCK) || 1.1,
+
+    // API request timeouts
+    /** Timeout for HTTP requests to concatenate endpoint */
+    API_CONCATENATE: Number(process.env.TIMEOUT_API_CONCATENATE) || 10000,
+    /** Timeout for HTTP requests to generate endpoint */
+    API_GENERATE: Number(process.env.TIMEOUT_API_GENERATE) || 10000,
+    /** Timeout for HTTP requests to feed endpoint */
+    API_FEED: Number(process.env.TIMEOUT_API_FEED) || 10000,
+    /** Timeout for HTTP requests to persona endpoint */
+    API_PERSONA: Number(process.env.TIMEOUT_API_PERSONA) || 10000,
+
+    // Polling and delay configurations (sleep delays in seconds)
+    /** Min delay range for keepAlive sleep (seconds) */
+    KEEP_ALIVE_SLEEP_MIN: Number(process.env.TIMEOUT_KEEP_ALIVE_MIN) || 1,
+    /** Max delay range for keepAlive sleep (seconds) */
+    KEEP_ALIVE_SLEEP_MAX: Number(process.env.TIMEOUT_KEEP_ALIVE_MAX) || 2,
+    /** Delay between lyrics generation polls (seconds) */
+    LYRICS_POLL_DELAY: Number(process.env.TIMEOUT_LYRICS_POLL) || 2,
+    /** Min delay range for audio generation polling (seconds) */
+    AUDIO_POLL_DELAY_MIN: Number(process.env.TIMEOUT_AUDIO_POLL_MIN) || 3,
+    /** Max delay range for audio generation polling (seconds) */
+    AUDIO_POLL_DELAY_MAX: Number(process.env.TIMEOUT_AUDIO_POLL_MAX) || 6,
+    /** Initial delay before starting audio polling (seconds) */
+    AUDIO_POLL_INITIAL_DELAY: Number(process.env.TIMEOUT_AUDIO_POLL_INITIAL) || 5,
+
+    // Overall operation timeouts
+    /** Maximum time to wait for audio generation completion */
+    AUDIO_GENERATION_MAX: Number(process.env.TIMEOUT_AUDIO_GENERATION_MAX) || 100000,
+  } as const;
 
   private readonly client: AxiosInstance;
   private sid?: string;
   private currentToken?: string;
   private deviceId?: string;
-  private isVercel: boolean;
   private userAgent?: string;
   private cookies: Record<string, string | undefined>;
-  private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
-  private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, {
-    default: false
-  });
+  private solver = new Solver(`${process.env.TWOCAPTCHA_KEY}`);
+  private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
   private cursor?: Cursor;
-  
+
   constructor(cookies: string) {
-    this.isVercel = process.env.VERCEL_URL !== undefined;
+    // Validate required environment variables at startup
+    validateEnvironment();
+
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
     this.cookies = cookie.parse(cookies);
     this.deviceId = this.cookies.ajs_anonymous_id || randomUUID();
@@ -113,8 +441,7 @@ class SunoApi {
       }
     });
     this.client.interceptors.request.use(config => {
-      // 请求链接包含suno.com时，添加Authorization头
-      if (config.url?.includes('suno.com') && this.currentToken && this.currentToken != undefined && !config.headers.Authorization)
+      if (this.currentToken && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
       const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
         cookie.serialize(key, value as string)
@@ -122,7 +449,7 @@ class SunoApi {
       config.headers.Cookie = cookiesArray.join('; ');
       return config;
     });
-    this.client.interceptors.response.use((resp) => {
+    this.client.interceptors.response.use(resp => {
       const setCookieHeader = resp.headers['set-cookie'];
       if (Array.isArray(setCookieHeader)) {
         const newCookies = cookie.parse(setCookieHeader.join('; '));
@@ -131,9 +458,21 @@ class SunoApi {
         }
       }
       return resp;
-    });
+    })
   }
 
+  /**
+   * Initialize the SunoApi instance by obtaining authentication tokens and keeping the session alive.
+   * This method must be called before using any other API methods.
+   *
+   * @returns Promise that resolves to the initialized SunoApi instance
+   * @throws Error if authentication fails or session cannot be established
+   *
+   * @example
+   * ```typescript
+   * const api = await new SunoApi(cookie).init();
+   * ```
+   */
   public async init(): Promise<SunoApi> {
     //await this.getClerkLatestVersion();
     await this.getAuthToken();
@@ -141,72 +480,54 @@ class SunoApi {
     return this;
   }
 
-  /**
-   * Get the clerk package latest version id.
-   * This method is commented because we are now using a hard-coded Clerk version, hence this method is not needed.
-   
-  private async getClerkLatestVersion() {
-    // URL to get clerk version ID
-    const getClerkVersionUrl = `${SunoApi.JSDELIVR_BASE_URL}/v1/package/npm/@clerk/clerk-js`;
-    // Get clerk version ID
-    const versionListResponse = await this.client.get(getClerkVersionUrl);
-    if (!versionListResponse?.data?.['tags']['latest']) {
-      throw new Error(
-        'Failed to get clerk version info, Please try again later'
-      );
-    }
-    // Save clerk version ID for auth
-    SunoApi.clerkVersion = versionListResponse?.data?.['tags']['latest'];
-  }
-  */
 
   /**
    * Get the session ID and save it for later use.
    */
   private async getAuthToken() {
-    // this.sid = "session_b2fcd20cedcd920400959d"
-    // this.currentToken = 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdW5vLmNvbS9jbGFpbXMvdXNlcl9pZCI6IjM0N2RhM2FhLWNiYTQtNGU4MS05NjVjLTkzZmQ1NWM2ODg3NyIsImh0dHBzOi8vc3Vuby5haS9jbGFpbXMvY2xlcmtfaWQiOiJ1c2VyXzM2RVpQdEhhellNbzMyRlVFaHVKTnROUDhLdyIsInN1bm8uY29tL2NsYWltcy90b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxNzY3Njg4MzY5LCJhdWQiOiJzdW5vLWFwaSIsInN1YiI6InVzZXJfMzZFWlB0SGF6WU1vMzJGVUVodUpOdE5QOEt3IiwiYXpwIjoiaHR0cHM6Ly9zdW5vLmNvbSIsImZ2YSI6WzAsLTFdLCJpYXQiOjE3Njc2ODQ3NjksImlzcyI6Imh0dHBzOi8vYXV0aC5zdW5vLmNvbSIsImppdCI6IjNjNWUwMWE4LWExNjMtNGIyMC04ZmEwLWQwOWI1MjE0MzA0MSIsInZpeiI6ZmFsc2UsInNpZCI6InNlc3Npb25fYjJmY2QyMGNlZGNkOTIwNDAwOTU5ZCIsInN1bm8uY29tL2NsYWltcy9lbWFpbCI6IjM0MzY1MTE1MkBxcS5jb20iLCJodHRwczovL3N1bm8uYWkvY2xhaW1zL2VtYWlsIjoiMzQzNjUxMTUyQHFxLmNvbSJ9.qtQMKnmr7sOq4g8CoowJlX12ltD88oSJ6YkDG-LRnBQMuo8Vccnp1k31paC2FCyA0UhbXda8Hq1VI0FJsclDoCy03yupubbXr9J6XNeVdiFv1_801HZxcSrns-hzl5_2ugKCN6877jPGxiuKUNvs2YTceA4RNnFjjeuZR2WHxzCofTk9l1qRnvLiyxOwMjHhSSIQR7Exn9FrqZgxmdN_TDQy3pjXSq6HUQYkbeKRlvulbmtEb_H3eT1zc2gSlSbR3w08bmxYzVwJRsWNw1YCYdNzVM6SFLR7tsyZajjCDuBuR72feJtGjKwugc--WYcPbLVAzzgoT8mHdC7NPJW3vw'
-
-    logger.info('Getting the session ID');
+    logger.info('Getting the session ID from auth.suno.com');
     // URL to get session ID
-    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
-    // console.error(getSessionUrl, this.cookies.__client,"99999");
+    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
     // Get session ID
     const sessionResponse = await this.client.get(getSessionUrl, {
-       headers: { Authorization: this.cookies.__client }
+      headers: { Authorization: this.cookies.__client }
     });
     if (!sessionResponse?.data?.response?.last_active_session_id) {
-      console.error("Session Error Response:", JSON.stringify(sessionResponse.data));
       throw new Error(
         'Failed to get session id, you may need to update the SUNO_COOKIE'
       );
     }
     // Save session ID for later use
     this.sid = sessionResponse.data.response.last_active_session_id;
-    this.currentToken = sessionResponse.data.response.sessions[0].last_active_token.jwt;
   }
 
   /**
-   * Keep the session alive.
-   * @param isWait Indicates if the method should wait for the session to be fully renewed before returning.
+   * Renew the session token to keep the authentication active.
+   * This method should be called periodically to prevent session expiration.
+   *
+   * @param isWait - If true, adds a delay after token renewal before returning. Defaults to false
+   * @throws Error if session ID is not set or token renewal fails
+   *
+   * @example
+   * ```typescript
+   * await api.keepAlive(true); // Wait after renewal
+   * ```
    */
   public async keepAlive(isWait?: boolean): Promise<void> {
     if (!this.sid) {
       throw new Error('Session ID is not set. Cannot renew token.');
     }
     // URL to renew session token
-    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/touch?__clerk_api_version=2025-11-10&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/tokens?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
     // Renew session token
-    logger.info('KeepAlive... '+renewUrl+' \n');
+    logger.info('KeepAlive...\n');
     const renewResponse = await this.client.post(renewUrl, {}, {
-      // headers: { Authorization: this.cookies.__client }
+      headers: { Authorization: this.cookies.__client }
     });
-
-    // logger.info('Renew Response:\n' + JSON.stringify(renewResponse.data, null, 2));
     if (isWait) {
-      await sleep(1, 2);
+      await sleep(SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MIN, SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MAX);
     }
-    const newToken = renewResponse.data.response.last_active_token.jwt;
+    const newToken = renewResponse.data.jwt;
     // Update Authorization field in request header with the new JWT token
     this.currentToken = newToken;
   }
@@ -229,7 +550,7 @@ class SunoApi {
     const resp = await this.client.post(`${SunoApi.BASE_URL}/api/c/check`, {
       ctype: 'generation'
     });
-    logger.info(resp.data);
+    logger.debug('CAPTCHA check response', sanitize(resp.data));
     return resp.data.required;
   }
 
@@ -238,15 +559,16 @@ class SunoApi {
    */
   private async click(target: Locator|Page, position?: { x: number, y: number }): Promise<void> {
     if (this.ghostCursorEnabled) {
-      let pos: any = isPage(target) ? { x: 0, y: 0 } : await target.boundingBox();
-      if (position) 
+      let pos: BoundingBox | { x: number; y: number } = isPage(target) ? { x: 0, y: 0 } : await target.boundingBox() as BoundingBox;
+      if (position) {
+        const basePos = 'width' in pos ? pos : { ...pos, width: 0, height: 0 };
         pos = {
-          ...pos,
-          x: pos.x + position.x,
-          y: pos.y + position.y,
-          width: null,
-          height: null,
+          x: basePos.x + position.x,
+          y: basePos.y + position.y,
+          width: basePos.width,
+          height: basePos.height,
         };
+      }
       return this.cursor?.actions.click({
         target: pos
       });
@@ -266,9 +588,9 @@ class SunoApi {
     const browser = process.env.BROWSER?.toLowerCase();
     switch (browser) {
       case 'firefox':
-        return playwright.firefox;
+        return firefox;
       default:
-        return playwright.chromium;
+        return chromium;
     }
   }
 
@@ -277,234 +599,532 @@ class SunoApi {
    * @returns {BrowserContext}
    */
   private async launchBrowser(): Promise<BrowserContext> {
-    let baseArgs = [
+    const args = [
       '--disable-blink-features=AutomationControlled',
       '--disable-web-security',
       '--no-sandbox',
       '--disable-dev-shm-usage',
       '--disable-features=site-per-process',
       '--disable-features=IsolateOrigins',
-      '--disable-extensions'
+      '--disable-extensions',
+      '--disable-infobars'
     ];
     // Check for GPU acceleration, as it is recommended to turn it off for Docker
     if (yn(process.env.BROWSER_DISABLE_GPU, { default: false }))
-
-    baseArgs.push(
-      '--enable-unsafe-swiftshader',
-      '--disable-gpu',
-      '--disable-setuid-sandbox'
-    );
-
-    logger.info({
-      msg: 'Launching browser',
-      isVercel: this.isVercel,
-      nodeEnv: process.env.NODE_ENV,
-      totalArgs: baseArgs.length
+      args.push('--enable-unsafe-swiftshader',
+        '--disable-gpu',
+        '--disable-setuid-sandbox');
+    // Auto-open DevTools when not headless (for debugging)
+    if (!yn(process.env.BROWSER_HEADLESS, { default: true }))
+      args.push('--auto-open-devtools-for-tabs');
+    const browser = await this.getBrowserType().launch({
+      args,
+      headless: yn(process.env.BROWSER_HEADLESS, { default: true })
     });
-
-    let browser: playwright.Browser;
-
-    if (this.isVercel) {
-      browser = await playwright.chromium.launch({
-        args: uniq([...baseArgs, ...chromium.args]),
-        executablePath: await chromium.executablePath(),
-        headless: true
-      });
-    } else {
-      browser = await this.getBrowserType().launch({
-        args: baseArgs,
-        headless: yn(process.env.BROWSER_HEADLESS, { default: true })
-      });
-    }
-
-    const context = await browser.newContext({
-      userAgent: this.userAgent,
-      locale: process.env.BROWSER_LOCALE,
-      viewport: null
-    });
-
-    const cookies = [];
+    const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
+    const cookies: Array<{name: string, value: string, domain: string, path: string, sameSite: 'Lax' | 'Strict' | 'None', secure?: boolean, httpOnly?: boolean}> = [];
     const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
-    cookies.push({
-      name: '__session',
-      value: this.currentToken+'',
-      domain: '.suno.com',
-      path: '/',
-      sameSite: lax
-    });
+    const none: 'Lax' | 'Strict' | 'None' = 'None';
+
+    // DO NOT set __session cookie ourselves!
+    // The currentToken JWT has aud:"suno-api" which is for API calls only.
+    // Clerk middleware expects a browser session token with different claims.
+    // Let Clerk JS create __session by navigating to homepage first.
+
+    // Set most cookies on .suno.com domain (except special ones we handle separately)
     for (const key in this.cookies) {
+      if (key === '__client' || key === '__client_uat') continue;
       cookies.push({
         name: key,
-        value: this.cookies[key]+'',
+        value: `${this.cookies[key]}`,
         domain: '.suno.com',
         path: '/',
         sameSite: lax
-      })
+      });
     }
+
+    // __client cookie must be on BOTH auth.suno.com AND clerk.suno.com!
+    // - suno.com uses auth.suno.com for Clerk API
+    // - accounts.suno.com uses clerk.suno.com for Clerk API
+    if (this.cookies.__client) {
+      // For auth.suno.com (used by suno.com)
+      cookies.push({
+        name: '__client',
+        value: `${this.cookies.__client}`,
+        domain: 'auth.suno.com',
+        path: '/',
+        sameSite: none,
+        secure: true,
+        httpOnly: true
+      });
+      // For clerk.suno.com (used by accounts.suno.com)
+      cookies.push({
+        name: '__client',
+        value: `${this.cookies.__client}`,
+        domain: 'clerk.suno.com',
+        path: '/',
+        sameSite: lax,  // clerk.suno.com uses SameSite=Lax
+        secure: true,
+        httpOnly: true
+      });
+    }
+
+    // __client_uat exists on BOTH domains with different values:
+    // 1. auth.suno.com with value "0" and SameSite=None
+    // 2. .suno.com with actual timestamp and SameSite=Lax
+    // CRITICAL: The timestamp is in session-variant cookies like __client_uat_Jnxw-muT
+    // The plain __client_uat from cookie parsing is often "0" which means "unauthenticated"!
+
+    // Find the REAL timestamp from session-variant __client_uat_* cookie
+    let clientUatTimestamp = this.cookies.__client_uat || '0';
+    for (const key in this.cookies) {
+      if (key.startsWith('__client_uat_') && this.cookies[key] && this.cookies[key] !== '0') {
+        clientUatTimestamp = this.cookies[key]!;
+        logger.debug(`Found session-variant UAT: ${key}=${clientUatTimestamp}`);
+        break;
+      }
+    }
+
+    if (clientUatTimestamp && clientUatTimestamp !== '0') {
+      // On auth.suno.com with value 0
+      cookies.push({
+        name: '__client_uat',
+        value: '0',
+        domain: 'auth.suno.com',
+        path: '/',
+        sameSite: none,
+        secure: true
+      });
+      // On .suno.com with actual timestamp - THIS IS CRITICAL FOR AUTH!
+      cookies.push({
+        name: '__client_uat',
+        value: clientUatTimestamp,
+        domain: '.suno.com',
+        path: '/',
+        sameSite: lax,
+        secure: true
+      });
+      logger.debug(`Setting __client_uat=${clientUatTimestamp} on .suno.com`);
+    } else {
+      logger.warn('No valid __client_uat timestamp found! Browser auth will fail.');
+    }
+
+    // Log cookies being set for debugging
+    logger.debug('Setting browser cookies:', cookies.map(c => ({ name: c.name, domain: c.domain, sameSite: c.sameSite, httpOnly: c.httpOnly })));
+
     await context.addCookies(cookies);
+
     return context;
   }
 
   /**
-   * Checks for CAPTCHA verification and solves the CAPTCHA if needed
-   * @returns {string|null} hCaptcha token. If no verification is required, returns null
+   * Solves CAPTCHA using 2Captcha service with retry logic
+   * @param challenge The challenge container locator
+   * @param isDrag Whether this is a drag-type CAPTCHA
+   * @returns CAPTCHA solution or null if failed
+   */
+  private async solveCaptchaWithRetry(challenge: Locator, isDrag: boolean): Promise<CaptchaSolution | null> {
+    const maxRetries = 3;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        logger.info('Sending the CAPTCHA to 2Captcha');
+        const payload: paramsCoordinates = {
+          body: (await challenge.screenshot({ timeout: SunoApi.TIMEOUTS.CAPTCHA_SCREENSHOT })).toString('base64'),
+          lang: process.env.BROWSER_LOCALE
+        };
+        if (isDrag) {
+          // Provide instructions for drag-type CAPTCHA
+          payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
+          payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
+        }
+        return await this.solver.coordinates(payload) as unknown as CaptchaSolution;
+      } catch(err) {
+        const error = toError(err);
+        logger.info(error.message);
+        if (attempt < maxRetries - 1) {
+          logger.info('Retrying...');
+        } else {
+          throw error;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Validates that drag-type CAPTCHA solution has even number of coordinate points
+   * @param solution The CAPTCHA solution to validate
+   * @returns true if valid, false if invalid
+   */
+  private validateDragSolution(solution: CaptchaSolution): boolean {
+    if (solution.data.length % 2 !== 0) {
+      logger.info('Solution does not have even amount of points required for dragging. Requesting new solution...');
+      this.solver.badReport(solution.id);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Performs drag-type CAPTCHA interaction
+   * @param page The page to perform mouse actions on
+   * @param challengeBox The bounding box of the challenge container
+   * @param solution The CAPTCHA solution with coordinate pairs
+   */
+  private async performDragInteraction(page: Page, challengeBox: BoundingBox, solution: CaptchaSolution): Promise<void> {
+    for (let i = 0; i < solution.data.length; i += 2) {
+      const startPoint = solution.data[i];
+      const endPoint = solution.data[i + 1];
+      logger.info(JSON.stringify(startPoint) + JSON.stringify(endPoint));
+
+      // Move to start position
+      await page.mouse.move(challengeBox.x + +startPoint.x, challengeBox.y + +startPoint.y);
+      await page.mouse.down();
+
+      // Wait for piece to unlock
+      await sleep(SunoApi.TIMEOUTS.CAPTCHA_PIECE_UNLOCK_DELAY);
+
+      // Drag to end position
+      await page.mouse.move(challengeBox.x + +endPoint.x, challengeBox.y + +endPoint.y, { steps: 30 });
+      await page.mouse.up();
+    }
+  }
+
+  /**
+   * Performs click-type CAPTCHA interaction
+   * @param challenge The challenge container locator
+   * @param solution The CAPTCHA solution with click coordinates
+   */
+  private async performClickInteraction(challenge: Locator, solution: CaptchaSolution): Promise<void> {
+    for (const coordinate of solution.data) {
+      logger.info(coordinate);
+      await this.click(challenge, { x: +coordinate.x, y: +coordinate.y });
+    }
+  }
+
+  /**
+   * Submits CAPTCHA solution and handles submission errors
+   * @param frame The iframe frame locator
+   * @param button The Create button to click if CAPTCHA window closed
+   */
+  private async submitCaptchaSolution(frame: ReturnType<Page['frameLocator']>, button: Locator): Promise<void> {
+    try {
+      await this.click(frame.locator('.button-submit'));
+    } catch(e) {
+      const error = toError(e);
+      if (error.message.includes('viewport')) {
+        // CAPTCHA window closed due to inactivity, retrigger it
+        await this.click(button);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Automatically detect and solve CAPTCHA challenges using 2Captcha service.
+   * Launches a browser, navigates to Suno, triggers CAPTCHA, and returns the solved token.
+   * Supports both click-based and drag-based CAPTCHA types.
+   *
+   * @returns Promise resolving to hCaptcha token string if CAPTCHA was required and solved, or null if no CAPTCHA needed
+   * @throws Error if browser launch fails, CAPTCHA solving fails, or timeout occurs
+   *
+   * @example
+   * ```typescript
+   * const token = await api.getCaptcha();
+   * if (token) {
+   *   console.log('CAPTCHA solved successfully');
+   * }
+   * ```
    */
   public async getCaptcha(): Promise<string|null> {
-    if (!await this.captchaRequired())
-      return null;
-
-    logger.info('CAPTCHA required. Launching browser...')
     const browser = await this.launchBrowser();
     const page = await browser.newPage();
-    await page.goto('https://suno.com/create', {
-      referer: 'https://www.google.com/',
-      waitUntil: 'domcontentloaded',
-      timeout: 0
-    });
 
-    logger.info('Waiting for Suno interface to load');
-    // await page.locator('.react-aria-GridList').waitFor({ timeout: 60000 });
-    await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 }); // wait for song list API call
+    // STEP 1: Navigate to homepage first to let Clerk JS establish session
+    // We don't have __session cookie - Clerk JS needs to create it by validating __client with auth.suno.com
+    logger.info('Step 1: Navigating to suno.com homepage to establish Clerk session...');
+    await page.goto('https://suno.com', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: SunoApi.TIMEOUTS.PAGE_NAVIGATION });
+
+    // Wait for Clerk JS to authenticate (it calls auth.suno.com/v1/client and sets __session)
+    logger.info('Waiting for Clerk JS to establish session...');
+    try {
+      await page.waitForResponse(
+        response => response.url().includes('auth.suno.com/v1/client') && response.status() === 200,
+        { timeout: 10000 }
+      );
+      logger.info('Clerk authentication response received');
+      // Give Clerk JS time to process and set cookies
+      await sleep(2);
+    } catch (e) {
+      logger.warn('Clerk auth response timeout - continuing anyway');
+    }
+
+    // STEP 2: Now navigate to the protected page
+    logger.info('Step 2: Navigating to suno.com/create...');
+    await page.goto('https://suno.com/create', { referer: 'https://suno.com/', waitUntil: 'domcontentloaded', timeout: SunoApi.TIMEOUTS.PAGE_NAVIGATION });
+
+    // Wait for the page to be fully loaded (React app needs time to render)
+    logger.info('Waiting for page to fully load...');
+    try {
+      // Wait for the song list API call which indicates the page is ready
+      await page.waitForResponse(response =>
+        response.url().includes('/api/project/') && response.status() === 200,
+        { timeout: SunoApi.TIMEOUTS.PAGE_API_RESPONSE }
+      );
+      logger.info('Page fully loaded');
+    } catch(e) {
+      logger.info('API response timeout - page might not be fully loaded, continuing anyway');
+    }
 
     if (this.ghostCursorEnabled)
       this.cursor = await createCursor(page);
-    
+
     logger.info('Triggering the CAPTCHA');
+
+    // Try multiple methods to close popups
     try {
-      await page.getByLabel('Close').click({ timeout: 2000 }); // close all popups
-      // await this.click(page, { x: 318, y: 13 });
-    } catch(e) {}
+      logger.info('Attempting to close popup with getByLabel...');
+      await page.getByLabel('Close').click({ timeout: SunoApi.TIMEOUTS.POPUP_CLOSE });
+      logger.info('Popup closed successfully');
+    } catch(e) {
+      logger.info('getByLabel failed, trying alternative selectors...');
+      try {
+        // Try button with aria-label
+        await page.locator('button[aria-label="Close"]').click({ timeout: SunoApi.TIMEOUTS.POPUP_CLOSE });
+        logger.info('Popup closed with aria-label selector');
+      } catch(e2) {
+        // Try SVG close icon
+        try {
+          await page.locator('svg[data-testid="close-icon"]').click({ timeout: SunoApi.TIMEOUTS.POPUP_CLOSE });
+          logger.info('Popup closed with SVG selector');
+        } catch(e3) {
+          logger.info('No popup found or unable to close - continuing anyway');
+        }
+      }
+    }
 
-    const textarea = page.locator('.custom-textarea');
-    await this.click(textarea);
-    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
-
-    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
-    this.click(button);
-
+    // Set up route interception BEFORE clicking the Create button
     const controller = new AbortController();
-    new Promise<void>(async (resolve, reject) => {
+
+    // Log all API requests to see what's actually being called
+    page.on('request', request => {
+      if (request.url().includes('/api/')) {
+        logger.info(`API Request: ${request.method()} ${request.url()}`);
+      }
+    });
+
+    const tokenPromise = new Promise<string|null>((resolve, reject) => {
+      // Try multiple patterns to catch the generate request
+      const patterns = [
+        '**/api/generate/v2/**',
+        '**/api/generate/v3/**',
+        '**/api/generate/**',
+        '**/generate/**'
+      ];
+
+      patterns.forEach(pattern => {
+        page.route(pattern, async (route) => {
+          try {
+            logger.info(`Route intercepted! Pattern: ${pattern}, URL: ${route.request().url()}`);
+            logger.info('Extracting token from request...');
+
+            const request = route.request();
+            const headers = request.headers();
+            const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
+
+            logger.debug('Request headers', sanitize(headers));
+            logger.debug('Request post data', sanitize(postData));
+
+            // Extract token from post data if it exists
+            const token = postData?.token || postData?.hcaptcha_token;
+
+            // Extract auth token from headers
+            if (headers.authorization) {
+              this.currentToken = headers.authorization.split('Bearer ').pop();
+            }
+
+            logger.info(`Captured token: ${token ? 'Yes' : 'No'}`);
+            logger.info('Aborting request and closing browser');
+
+            route.abort();
+            const browserInstance = browser.browser();
+            if (browserInstance) {
+              browserInstance.close().catch(closeError => {
+                logger.error('Failed to close browser during route interception', { error: toError(closeError) });
+              });
+            } else {
+              logger.warn('Browser instance not available for cleanup during route interception');
+            }
+            controller.abort();
+
+            resolve(token || null);
+          } catch(err) {
+            const error = toError(err);
+            logger.error(`Route interception error: ${error.message}`);
+            reject(error);
+          }
+        });
+      });
+    });
+
+    // Find and fill the textarea - try multiple selectors
+    logger.info('Looking for song description textarea...');
+    let textarea;
+    try {
+      // Try original selector first
+      textarea = page.locator('textarea[placeholder*="Hip-hop"]');
+      await textarea.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.TEXTAREA_WAIT });
+      logger.info('Found textarea with Hip-hop placeholder');
+    } catch(e) {
+      logger.info('Hip-hop placeholder not found, trying alternative selectors...');
+      // Try finding any visible textarea on the page
+      const textareas = page.locator('textarea');
+      const count = await textareas.count();
+      logger.info(`Found ${count} textareas on page`);
+
+      // Usually the song description textarea is the first or second one
+      for (let i = 0; i < count; i++) {
+        const ta = textareas.nth(i);
+        if (await ta.isVisible()) {
+          textarea = ta;
+          logger.info(`Using textarea at index ${i}`);
+          break;
+        }
+      }
+
+      if (!textarea) {
+        throw new Error('Could not find any visible textarea on the page');
+      }
+    }
+
+    logger.info('Filling textarea with test prompt...');
+    await textarea.focus();
+    const testPrompt = process.env.CAPTCHA_TEST_PROMPT || 'Lorem ipsum';
+    await textarea.fill(testPrompt);
+    logger.info('Textarea filled successfully');
+
+    logger.info('Looking for Create button...');
+    const button = page.locator('button[aria-label="Create song"]');
+    await button.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.CREATE_BUTTON_WAIT });
+    logger.info('Clicking Create button...');
+    await button.click();
+    logger.info('Create button clicked - waiting for CAPTCHA...');
+
+    // Store the CAPTCHA solving promise to ensure it's properly handled
+    const captchaSolvingPromise = new Promise<void>(async (resolve, reject) => {
       const frame = page.frameLocator('iframe[title*="hCaptcha"]');
       const challenge = frame.locator('.challenge-container');
       try {
-        let wait = true;
+        let shouldWaitForImages = true;
+
+        // Continuous CAPTCHA solving loop
         while (true) {
-          if (wait)
-            await waitForRequests(page, controller.signal);
-          const drag = (await challenge.locator('.prompt-text').first().innerText()).toLowerCase().includes('drag');
-          let captcha: any;
-          for (let j = 0; j < 3; j++) { // try several times because sometimes 2Captcha could return an error
-            try {
-              logger.info('Sending the CAPTCHA to 2Captcha');
-              const payload: paramsCoordinates = {
-                body: (await challenge.screenshot({ timeout: 5000 })).toString('base64'),
-                lang: process.env.BROWSER_LOCALE
-              };
-              if (drag) {
-                // Say to the worker that he needs to click
-                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
-                payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
-              }
-              captcha = await this.solver.coordinates(payload);
-              break;
-            } catch(err: any) {
-              logger.info(err.message);
-              if (j != 2)
-                logger.info('Retrying...');
-              else
-                throw err;
-            }
-          } 
-          if (drag) {
-            const challengeBox = await challenge.boundingBox();
-            if (challengeBox == null)
-              throw new Error('.challenge-container boundingBox is null!');
-            if (captcha.data.length % 2) {
-              logger.info('Solution does not have even amount of points required for dragging. Requesting new solution...');
-              this.solver.badReport(captcha.id);
-              wait = false;
-              continue;
-            }
-            for (let i = 0; i < captcha.data.length; i += 2) {
-              const data1 = captcha.data[i];
-              const data2 = captcha.data[i+1];
-              logger.info(JSON.stringify(data1) + JSON.stringify(data2));
-              await page.mouse.move(challengeBox.x + +data1.x, challengeBox.y + +data1.y);
-              await page.mouse.down();
-              await sleep(1.1); // wait for the piece to be 'unlocked'
-              await page.mouse.move(challengeBox.x + +data2.x, challengeBox.y + +data2.y, { steps: 30 });
-              await page.mouse.up();
-            }
-            wait = true;
-          } else {
-            for (const data of captcha.data) {
-              logger.info(data);
-              await this.click(challenge, { x: +data.x, y: +data.y });
-            };
+          // Wait for CAPTCHA images to load if needed
+          if (shouldWaitForImages) {
+            await sleep(SunoApi.TIMEOUTS.CAPTCHA_IMAGE_LOAD_DELAY);
           }
-          this.click(frame.locator('.button-submit')).catch(e => {
-            if (e.message.includes('viewport')) // when hCaptcha window has been closed due to inactivity,
-              this.click(button); // click the Create button again to trigger the CAPTCHA
-            else
-              throw e;
-          });
+
+          // Determine CAPTCHA type
+          const promptText = await challenge.locator('.prompt-text').first().innerText();
+          const isDragType = promptText.toLowerCase().includes('drag');
+
+          // Solve CAPTCHA with retry logic
+          const solution = await this.solveCaptchaWithRetry(challenge, isDragType);
+          if (!solution) {
+            throw new Error('Failed to solve CAPTCHA after 3 attempts');
+          }
+
+          // Handle drag-type CAPTCHA
+          if (isDragType) {
+            // Validate solution has even number of points
+            if (!this.validateDragSolution(solution)) {
+              shouldWaitForImages = false;
+              continue; // Request new solution
+            }
+
+            // Get challenge bounding box for coordinate calculations
+            const challengeBox = await challenge.boundingBox();
+            if (!challengeBox) {
+              throw new Error('.challenge-container boundingBox is null!');
+            }
+
+            // Perform drag interaction
+            await this.performDragInteraction(page, challengeBox, solution);
+            shouldWaitForImages = true;
+          } else {
+            // Handle click-type CAPTCHA
+            await this.performClickInteraction(challenge, solution);
+          }
+
+          // Submit solution
+          await this.submitCaptchaSolution(frame, button);
         }
-      } catch(e: any) {
-        if (e.message.includes('been closed') // catch error when closing the browser
-          || e.message == 'AbortError') // catch error when waitForRequests is aborted
+      } catch(e) {
+        const error = toError(e);
+        // Check for expected termination conditions
+        if (error.message.includes('been closed') || error.message === 'AbortError') {
           resolve();
-        else
-          reject(e);
+        } else {
+          reject(error);
+        }
       }
     }).catch(e => {
-      browser.browser()?.close();
-      throw e;
+      const error = toError(e);
+      const browserInstance = browser.browser();
+      if (browserInstance) {
+        browserInstance.close().catch(closeError => {
+          logger.error('Failed to close browser after CAPTCHA error', { error: toError(closeError) });
+        });
+      } else {
+        logger.warn('Browser instance not available for cleanup after CAPTCHA error');
+      }
+      throw error;
     });
-    return (new Promise((resolve, reject) => {
-      page.route('**/api/generate/v2-web/**', async (route: any) => {
-        try {
-          logger.info('hCaptcha token received. Closing browser');
-          route.abort();
-          browser.browser()?.close();
-          controller.abort();
-          const request = route.request();
-          this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(request.postDataJSON().token);
-        } catch(err) {
-          reject(err);
-        }
-      });
-    }));
+
+    // Wait for either tokenPromise or captchaSolvingPromise to complete
+    // This ensures proper coordination between token extraction and CAPTCHA solving
+    await Promise.race([tokenPromise, captchaSolvingPromise]);
+
+    return tokenPromise;
   }
 
-  /**
-   * Imitates Cloudflare Turnstile loading error. Unused right now, left for future
-   */
-  private async getTurnstile() {
-    return this.client.post(
-      `https://clerk.suno.com/v1/client?__clerk_api_version=2021-02-05&_clerk_js_version=${SunoApi.CLERK_VERSION}&_method=PATCH`,
-      { captcha_error: '300030,300030,300030' },
-      { headers: { 'content-type': 'application/x-www-form-urlencoded' } });
-  }
 
   /**
-   * Generate a song based on the prompt.
-   * @param prompt The text prompt to generate audio from.
-   * @param make_instrumental Indicates if the generated audio should be instrumental.
-   * @param wait_audio Indicates if the method should wait for the audio file to be fully generated before returning.
-   * @returns
+   * Generate music from a text description using AI.
+   * Suno's AI will create lyrics, style, and melody based on your prompt.
+   *
+   * @param prompt - Text description of the desired music (e.g., "upbeat jazz music about coding")
+   * @param make_instrumental - If true, generates music without vocals. Defaults to false
+   * @param model - Model version to use. Defaults to 'chirp-crow' (v5)
+   * @param wait_audio - If true, waits until audio generation is complete before returning. Defaults to false
+   * @returns Promise resolving to array of AudioInfo objects (typically 2 variations)
+   * @throws Error if prompt is empty, generation fails, or CAPTCHA cannot be solved
+   *
+   * @example
+   * ```typescript
+   * // Simple generation
+   * const songs = await api.generate('energetic rock anthem');
+   *
+   * // Instrumental with wait
+   * const instrumental = await api.generate(
+   *   'calm piano melody',
+   *   true,  // instrumental
+   *   undefined,  // default model
+   *   true   // wait for completion
+   * );
+   * console.log(instrumental[0].audio_url);
+   * ```
    */
   public async generate(
     prompt: string,
     make_instrumental: boolean = false,
     model?: string,
-    wait_audio: boolean = false,
-    cover_clip_id?:string,
+    wait_audio: boolean = false
   ): Promise<AudioInfo[]> {
-    logger.info('Generate called with prompt: ' + prompt);
+    validateRequiredString(prompt, 'prompt');
+    validateOptionalString(model, 'model');
     await this.keepAlive(false);
-    let task = '';
-    if (cover_clip_id) task = 'cover';
     const startTime = Date.now();
     const audios = await this.generateSongs(
       prompt,
@@ -513,90 +1133,104 @@ class SunoApi {
       undefined,
       make_instrumental,
       model,
-      wait_audio,
-      '',
-      task,
-      '',
-      0,
-      cover_clip_id,
-      '',
-      '',
+      wait_audio
     );
     const costTime = Date.now() - startTime;
-    logger.info('Generate Response:\n' + JSON.stringify(audios, null, 2));
-    logger.info('Cost time: ' + costTime);
+    logger.info(`Generate Response:\n${JSON.stringify(audios, null, 2)}`);
+    logger.info(`Cost time: ${costTime}`);
     return audios;
   }
 
   /**
-   * Calls the concatenate endpoint for a clip to generate the whole song.
-   * @param clip_id The ID of the audio clip to concatenate.
-   * @returns A promise that resolves to an AudioInfo object representing the concatenated audio.
-   * @throws Error if the response status is not 200.
+   * Concatenate multiple song segments into a complete full-length track.
+   * Useful for combining extended audio clips into one continuous song.
+   *
+   * @param clip_id - ID of the audio clip to concatenate
+   * @returns Promise resolving to AudioInfo object with the concatenated audio
+   * @throws Error if clip_id is invalid, not found, or API request fails
+   *
+   * @example
+   * ```typescript
+   * const fullSong = await api.concatenate('clip-id-123');
+   * console.log(fullSong.audio_url);
+   * ```
    */
   public async concatenate(clip_id: string): Promise<AudioInfo> {
+    validateRequiredString(clip_id, 'clip_id');
     await this.keepAlive(false);
-    const payload: any = { clip_id: clip_id };
+    const payload: { clip_id: string } = { clip_id: clip_id };
 
-    const response = await this.client.post(
+    const response = await this.client.post<AudioInfo>(
       `${SunoApi.BASE_URL}/api/generate/concat/v2/`,
       payload,
       {
-        timeout: 10000 // 10 seconds timeout
+        timeout: SunoApi.TIMEOUTS.API_CONCATENATE
       }
     );
     if (response.status !== 200) {
-      throw new Error('Error response:' + response.statusText);
+      throw new Error(`Error response: ${response.statusText}`);
     }
     return response.data;
   }
 
   /**
-   * Generates custom audio based on provided parameters.
+   * Generate music with custom lyrics, style tags, and title.
+   * Provides full control over song generation with explicit lyrics and metadata.
    *
-   * @param prompt The text prompt to generate audio from.
-   * @param tags Tags to categorize the generated audio.
-   * @param title The title for the generated audio.
-   * @param make_instrumental Indicates if the generated audio should be instrumental.
-   * @param wait_audio Indicates if the method should wait for the audio file to be fully generated before returning.
-   * @param negative_tags Negative tags that should not be included in the generated audio.
-   * @returns A promise that resolves to an array of AudioInfo objects representing the generated audios.
+   * @param prompt - Custom lyrics or vocal content for the song
+   * @param tags - Musical style tags (e.g., "jazz, piano, slow tempo")
+   * @param title - Title for the generated song
+   * @param make_instrumental - If true, generates instrumental version. Defaults to false
+   * @param model - Model version to use. Defaults to 'chirp-crow' (v5)
+   * @param wait_audio - If true, waits until generation completes. Defaults to false
+   * @param negative_tags - Style elements to avoid (e.g., "electronic, drums")
+   * @returns Promise resolving to array of AudioInfo objects (typically 2 variations)
+   * @throws Error if required parameters are empty or generation fails
+   *
+   * @example
+   * ```typescript
+   * const songs = await api.custom_generate(
+   *   '[Verse]\nCoding all night long\n[Chorus]\nBugs are everywhere',
+   *   'indie rock, energetic, electric guitar',
+   *   'Developer Blues',
+   *   false,
+   *   undefined,
+   *   true,
+   *   'slow, acoustic'
+   * );
+   * ```
    */
   public async custom_generate(
-    prompt: string, // 自定义模式下只有歌词，没有描述
-    tags: string, // 音乐风格标签
-    title: string, // 音乐标题
-    make_instrumental: boolean = false, // 是否为纯音乐
-    model?: string, // 模型
-    wait_audio: boolean = false, 
-    negative_tags?: string, // 负面标签
-    cover_clip_id?: string, // 参照的音频ID
-    vocal_gender?: string // 人声性别
+    prompt: string,
+    tags: string,
+    title: string,
+    make_instrumental: boolean = false,
+    model?: string,
+    wait_audio: boolean = false,
+    negative_tags?: string
   ): Promise<AudioInfo[]> {
-    let task = '';
-    if (cover_clip_id) task = "cover";
+    console.log("999999999999");
+    validateRequiredString(prompt, 'prompt');
+    validateRequiredString(tags, 'tags');
+    validateRequiredString(title, 'title');
+    validateOptionalString(model, 'model');
+    validateOptionalString(negative_tags, 'negative_tags');
     const startTime = Date.now();
     const audios = await this.generateSongs(
-      "",
+      prompt,
       true,
       tags,
       title,
       make_instrumental,
       model,
       wait_audio,
-      negative_tags,
-      task, 
-      '',
-      0,
-      cover_clip_id,
-      prompt,
-      vocal_gender
+      negative_tags
     );
     const costTime = Date.now() - startTime;
     logger.info(
-      'Custom Generate Response:\n' + JSON.stringify(audios, null, 2)
+      `Custom Generate Response:\n${JSON.stringify(audios, null, 2)}`
     );
-    logger.info('Cost time: ' + costTime);
+    logger.info(`Cost time: ${costTime}`);
     return audios;
   }
 
@@ -611,13 +1245,8 @@ class SunoApi {
    * @param wait_audio Indicates if the method should wait for the audio file to be fully generated before returning.
    * @param negative_tags Negative tags that should not be included in the generated audio.
    * @param task Optional indication of what to do. Enter 'extend' if extending an audio, otherwise specify null.
-   * @param continue_clip_id 
+   * @param continue_clip_id
    * @returns A promise that resolves to an array of AudioInfo objects representing the generated songs.
-   */
-
-  /**
-   * Generates songs based on the provided parameters.
-   * [Updated for v5 / v2-web endpoint].
    */
   private async generateSongs(
     prompt: string,
@@ -630,116 +1259,64 @@ class SunoApi {
     negative_tags?: string,
     task?: string,
     continue_clip_id?: string,
-    continue_at?: number,
-    cover_clip_id?: string, // 自定义音乐
-    lyrics_prompt?: string, // 歌词
-    vocal_gender?: string // 人声性别
+    continue_at?: number
   ): Promise<AudioInfo[]> {
-    logger.info('generateSongs called with prompt: ' + prompt);
+    // Validate task parameter if provided
+    validateOptionalString(task, 'task');
+    validateOptionalString(continue_clip_id, 'continue_clip_id');
+    validateOptionalNumber(continue_at, 'continue_at');
+
+    // If task is 'extend', validate required parameters
+    if (task === 'extend') {
+      validateRequiredString(continue_clip_id, 'continue_clip_id (required when task is "extend")');
+    }
 
     await this.keepAlive();
-
-    // [v5 Support] model name mapping (chirp-v5-0 -> chirp-crow)
-    let mv = model || DEFAULT_MODEL;
-    if (mv === 'chirp-v5-0' || mv === 'v5') {
-      mv = 'chirp-crow';
-    }
-
-    // [v5 Security] create session token, transaction ID
-    const sessionToken = await this.getSessionToken();
-    const transactionId = randomUUID();
-
-    // [v5 Payload] modify construction for v2-web endpoint
-    const payload: any = {
-      token: await this.getCaptcha(),
-      generation_type: 'TEXT',
-      title: title || '',
-      tags: tags || '',
-      negative_tags: negative_tags || '',
-      mv: mv,
-      prompt: lyrics_prompt, // 歌词
-      // gpt_description_prompt: prompt,
+    const payload: Partial<GenerateSongsPayload> = {
       make_instrumental: make_instrumental,
-      user_uploaded_images_b64: null,
-      metadata: {
-        web_client_pathname: '/create',
-        is_max_mode: false,
-        create_mode: isCustom ? 'custom' : 'simple',
-        is_mumble: false,
-        create_session_token: sessionToken, // required
-        disable_volume_normalization: false,
-        can_control_sliders: ["weirdness_constraint", "style_weight"],
-        // exclude user_tier cause it could be optional (if error, need to fix it)
-        vocal_gender:vocal_gender,
-        last_lyrics_generation: {
-            title: "",
-            lyrics: "",
-            prompt: "",
-            lyrics_model: "default"
-        }
-      },
-      override_fields: [],
-
-      cover_clip_id: null,
-      cover_start_s: null,
-      cover_end_s: null,
-      persona_id: null,
-      artist_clip_id: null,
-      artist_start_s: null,
-      artist_end_s: null,
-      continue_clip_id: null,
-      continued_aligned_prompt: null,
-      continue_at: null,
-
-      transaction_uuid: transactionId // 필수
+      mv: model || DEFAULT_MODEL,
+      prompt: '',
+      generation_type: task === 'extend' ? 'EXTEND' : 'TEXT',
+      continue_at: continue_at,
+      continue_clip_id: continue_clip_id,
+      task: task,
+      token: await this.getCaptcha()
     };
-
-    // extra parameter for extension task
-    if (task === 'extend') {
-      payload.continue_clip_id = continue_clip_id;
-      payload.continue_at = continue_at;
-      payload.task = task;
-    } else if (task === 'cover') {
-      payload.cover_clip_id = cover_clip_id;
-      payload.task = task;
+    if (isCustom) {
+      payload.tags = tags;
+      payload.title = title;
+      payload.negative_tags = negative_tags;
+      payload.prompt = prompt;
+    } else {
+      payload.gpt_description_prompt = prompt;
     }
-
-    logger.info(
-      'generateSongs payload (v2-web):\n' +
-        JSON.stringify(
-          {
-            model: mv,
-            prompt: prompt,
-            tags: tags,
-            title: title,
-            payload: payload
-          },
-          null,
-          2
-        )
-    );
-
-    // [v5 Endpoint] send to /api/generate/v2-web/
-    const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/v2-web/`,
+    logger.info('generateSongs payload', sanitize({
+      prompt: prompt,
+      isCustom: isCustom,
+      tags: tags,
+      title: title,
+      make_instrumental: make_instrumental,
+      wait_audio: wait_audio,
+      negative_tags: negative_tags,
+      payload: payload
+    }));
+    const response = await this.client.post<ClipsResponse>(
+      `${SunoApi.BASE_URL}/api/generate/v2/`,
       payload,
       {
-        timeout: 10000 
+        timeout: SunoApi.TIMEOUTS.API_GENERATE
       }
     );
-
     if (response.status !== 200) {
-      throw new Error('Error response:' + response.statusText);
+      throw new Error(`Error response: ${response.statusText}`);
     }
-
-    const songIds = response.data.clips.map((audio: any) => audio.id);
-
-    // Wait logic (same as before)
+    const songIds = response.data.clips.map((audio) => audio.id);
+    //Want to wait for music file generation
     if (wait_audio) {
       const startTime = Date.now();
       let lastResponse: AudioInfo[] = [];
-      await sleep(5, 5);
-      while (Date.now() - startTime < 100000) {
+      await sleep(SunoApi.TIMEOUTS.AUDIO_POLL_INITIAL_DELAY, SunoApi.TIMEOUTS.AUDIO_POLL_INITIAL_DELAY);
+      while (Date.now() - startTime < SunoApi.TIMEOUTS.AUDIO_GENERATION_MAX) {
         const response = await this.get(songIds);
         const allCompleted = response.every(
           (audio) => audio.status === 'streaming' || audio.status === 'complete'
@@ -749,12 +1326,12 @@ class SunoApi {
           return response;
         }
         lastResponse = response;
-        await sleep(3, 6);
+        await sleep(SunoApi.TIMEOUTS.AUDIO_POLL_DELAY_MIN, SunoApi.TIMEOUTS.AUDIO_POLL_DELAY_MAX);
         await this.keepAlive(true);
       }
       return lastResponse;
     } else {
-      return response.data.clips.map((audio: any) => ({
+      return response.data.clips.map((audio): AudioInfo => ({
         id: audio.id,
         title: audio.title,
         image_url: audio.image_url,
@@ -775,34 +1352,42 @@ class SunoApi {
   }
 
   /**
-   * Generates lyrics based on a given prompt.
-   * @param prompt The prompt for generating lyrics.
-   * @returns The generated lyrics text.
+   * Generate song lyrics from a text prompt using AI.
+   * Returns formatted lyrics with verse/chorus structure.
+   *
+   * @param prompt - Description of desired lyrics theme or topic
+   * @returns Promise resolving to generated lyrics as string
+   * @throws Error if prompt is empty or lyrics generation fails
+   *
+   * @example
+   * ```typescript
+   * const lyrics = await api.generateLyrics('a song about summer vacation');
+   * console.log(lyrics);
+   * // Output:
+   * // [Verse]
+   * // Walking on the beach...
+   * // [Chorus]
+   * // Summer days are here...
+   * ```
    */
   public async generateLyrics(prompt: string): Promise<string> {
+    validateRequiredString(prompt, 'prompt');
     await this.keepAlive(false);
-    const sessionToken = await this.getSessionToken();
     // Initiate lyrics generation
     const generateResponse = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/lyrics-pair`,
-      { 
-        create_session_token : sessionToken,
-        lyrics_model : "default",
-        prompt : prompt, 
-        source : "create_ui"
-      }
+      `${SunoApi.BASE_URL}/api/generate/lyrics/`,
+      { prompt }
     );
-    const generateIda = generateResponse.data.lyrics_a_id;
-    // const generateIdb = generateResponse.data.lyrics_b_id;
+    const generateId = generateResponse.data.id;
 
     // Poll for lyrics completion
     let lyricsResponse = await this.client.get(
-      `${SunoApi.BASE_URL}/api/generate/lyrics/${generateIda}`
+      `${SunoApi.BASE_URL}/api/generate/lyrics/${generateId}`
     );
     while (lyricsResponse?.data?.status !== 'complete') {
-      await sleep(2); // Wait for 2 seconds before polling again
+      await sleep(SunoApi.TIMEOUTS.LYRICS_POLL_DELAY);
       lyricsResponse = await this.client.get(
-        `${SunoApi.BASE_URL}/api/generate/lyrics/${generateIda}`
+        `${SunoApi.BASE_URL}/api/generate/lyrics/${generateId}`
       );
     }
 
@@ -811,39 +1396,30 @@ class SunoApi {
   }
 
   /**
-   * edit lyrics based on a given prompt.
-   * @param prompt The prompt for generating lyrics.
-   * @returns The generated lyrics text.
-   */
-  public async editLyrics(title: string, prompt: string, lyrics: string): Promise<string> {
-    await this.keepAlive(false);
-    const sessionToken = await this.getSessionToken();
-    // Initiate lyrics generation
-    const generateResponse = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/lyrics-infill/`,
-      { 
-        context_lyrics_edit : lyrics,
-        context_lyrics_prefix : '',
-        context_lyrics_suffix : '',
-        create_session_token : sessionToken,
-        prompt : prompt, 
-        title :title 
-      }
-    );
-
-    // Return the generated lyrics text
-    return generateResponse.data;
-  }
-
-  /**
-   * Extends an existing audio clip by generating additional content based on the provided prompt.
+   * Extend an existing song by adding more content before or after a specific timestamp.
+   * Useful for making songs longer or adding new sections.
    *
-   * @param audioId The ID of the audio clip to extend.
-   * @param prompt The prompt for generating additional content.
-   * @param continueAt Extend a new clip from a song at mm:ss(e.g. 00:30). Default extends from the end of the song.
-   * @param tags Style of Music.
-   * @param title Title of the song.
-   * @returns A promise that resolves to an AudioInfo object representing the extended audio clip.
+   * @param audioId - ID of the audio clip to extend
+   * @param prompt - Lyrics or description for the new section. Defaults to empty string
+   * @param continueAt - Timestamp in seconds where extension should begin (e.g., 30 for 00:30)
+   * @param tags - Musical style tags for the extension. Defaults to empty string
+   * @param negative_tags - Style elements to avoid. Defaults to empty string
+   * @param title - Title for the extended song. Defaults to empty string
+   * @param model - Model version to use. Defaults to 'chirp-crow' (v5)
+   * @param wait_audio - If true, waits until generation completes. Defaults to false
+   * @returns Promise resolving to array of AudioInfo objects with extended audio
+   * @throws Error if audioId is invalid or continueAt is not a valid number
+   *
+   * @example
+   * ```typescript
+   * // Extend from the end
+   * const extended = await api.extendAudio(
+   *   'song-id-123',
+   *   '[Verse 3]\nNew verse here',
+   *   120,  // Continue at 2:00
+   *   'rock, energetic'
+   * );
+   * ```
    */
   public async extendAudio(
     audioId: string,
@@ -855,26 +1431,43 @@ class SunoApi {
     model?: string,
     wait_audio?: boolean
   ): Promise<AudioInfo[]> {
+    validateRequiredString(audioId, 'audioId');
+    validateOptionalString(model, 'model');
+    validateNumber(continueAt, 'continueAt');
     return this.generateSongs(prompt, true, tags, title, false, model, wait_audio, negative_tags, 'extend', audioId, continueAt);
   }
 
   /**
-   * Generate stems for a song.
-   * @param song_id The ID of the song to generate stems for.
-   * @returns A promise that resolves to an AudioInfo object representing the generated stems.
+   * Generate isolated audio stems (vocals, instruments, bass, drums) from a complete song.
+   * Useful for remixing or extracting individual track elements.
+   *
+   * @param song_id - ID of the song to split into stems
+   * @returns Promise resolving to array of AudioInfo objects, one for each stem track
+   * @throws Error if song_id is invalid or stem generation fails
+   *
+   * @example
+   * ```typescript
+   * const stems = await api.generateStems('song-id-123');
+   * // stems[0] = vocals only
+   * // stems[1] = instrumental only
+   * // stems[2] = bass only
+   * // stems[3] = drums only
+   * ```
    */
   public async generateStems(song_id: string): Promise<AudioInfo[]> {
+    validateRequiredString(song_id, 'song_id');
     await this.keepAlive(false);
-    const response = await this.client.post(
+    const response = await this.client.post<ClipsResponse>(
       `${SunoApi.BASE_URL}/api/edit/stems/${song_id}`, {}
     );
 
-    console.log('generateStems response:\n', response?.data);
-    return response.data.clips.map((clip: any) => ({
+    logger.info('generateStems response', sanitize(response?.data));
+    return response.data.clips.map((clip): AudioInfo => ({
       id: clip.id,
       status: clip.status,
       created_at: clip.created_at,
       title: clip.title,
+      model_name: clip.model_name,
       stem_from_id: clip.metadata.stem_from_id,
       duration: clip.metadata.duration
     }));
@@ -882,16 +1475,29 @@ class SunoApi {
 
 
   /**
-   * Get the lyric alignment for a song.
-   * @param song_id The ID of the song to get the lyric alignment for.
-   * @returns A promise that resolves to an object containing the lyric alignment.
+   * Get word-level timing data for synchronized lyric display (karaoke-style).
+   * Returns each word with its start and end timestamps.
+   *
+   * @param song_id - ID of the song to get lyric timing for
+   * @returns Promise resolving to array of TranscribedWord objects with timing data
+   * @throws Error if song_id is invalid or alignment data unavailable
+   *
+   * @example
+   * ```typescript
+   * const alignment = await api.getLyricAlignment('song-id-123');
+   * alignment.forEach(word => {
+   *   console.log(`${word.word}: ${word.start_s}s - ${word.end_s}s`);
+   * });
+   * // Output: "Hello: 0.5s - 0.8s"
+   * ```
    */
-  public async getLyricAlignment(song_id: string): Promise<object> {
+  public async getLyricAlignment(song_id: string): Promise<TranscribedWord[]> {
+    validateRequiredString(song_id, 'song_id');
     await this.keepAlive(false);
-    const response = await this.client.get(`${SunoApi.BASE_URL}/api/gen/${song_id}/aligned_lyrics/v2/`);
+    const response = await this.client.get<{ aligned_words: TranscribedWord[] }>(`${SunoApi.BASE_URL}/api/gen/${song_id}/aligned_lyrics/v2/`);
 
-    console.log(`getLyricAlignment ~ response:`, response.data);
-    return response.data?.aligned_words.map((transcribedWord: any) => ({
+    logger.info('getLyricAlignment response', sanitize(response.data));
+    return response.data?.aligned_words.map((transcribedWord): TranscribedWord => ({
       word: transcribedWord.word,
       start_s: transcribedWord.start_s,
       end_s: transcribedWord.end_s,
@@ -920,10 +1526,25 @@ class SunoApi {
   }
 
   /**
-   * Retrieves audio information for the given song IDs.
-   * @param songIds An optional array of song IDs to retrieve information for.
-   * @param page An optional page number to retrieve audio information from.
-   * @returns A promise that resolves to an array of AudioInfo objects.
+   * Retrieve detailed information about songs by IDs or get paginated feed.
+   * Can fetch specific songs or browse all user songs with pagination.
+   *
+   * @param songIds - Optional array of song IDs to retrieve. If omitted, returns user's song feed
+   * @param page - Optional page number for pagination when browsing feed
+   * @returns Promise resolving to array of AudioInfo objects with song details
+   * @throws Error if API request fails
+   *
+   * @example
+   * ```typescript
+   * // Get specific songs
+   * const songs = await api.get(['song-1', 'song-2']);
+   *
+   * // Get user's first page of songs
+   * const feed = await api.get();
+   *
+   * // Get second page
+   * const page2 = await api.get(undefined, '2');
+   * ```
    */
   public async get(
     songIds?: string[],
@@ -937,15 +1558,14 @@ class SunoApi {
     if (page) {
       url.searchParams.append('page', page);
     }
-    logger.info('Get audio status: ' + url.href);
+    logger.info(`Get audio status: ${url.href}`);
     const response = await this.client.get(url.href, {
-      // 10 seconds timeout
-      timeout: 10000
+      timeout: SunoApi.TIMEOUTS.API_FEED
     });
 
-    const audios = response.data.clips;
+    const audios: ClipInfo[] = response.data.clips;
 
-    return audios.map((audio: any) => ({
+    return audios.map((audio): AudioInfo => ({
       id: audio.id,
       title: audio.title,
       image_url: audio.image_url,
@@ -967,11 +1587,21 @@ class SunoApi {
   }
 
   /**
-   * Retrieves information for a specific audio clip.
-   * @param clipId The ID of the audio clip to retrieve information for.
-   * @returns A promise that resolves to an object containing the audio clip information.
+   * Get complete detailed metadata for a specific audio clip.
+   * Returns raw clip data including all metadata fields.
+   *
+   * @param clipId - ID of the clip to retrieve
+   * @returns Promise resolving to object with full clip information
+   * @throws Error if clipId is empty or clip not found
+   *
+   * @example
+   * ```typescript
+   * const clip = await api.getClip('clip-id-123');
+   * console.log(clip);
+   * ```
    */
   public async getClip(clipId: string): Promise<object> {
+    validateRequiredString(clipId, 'clipId');
     await this.keepAlive(false);
     const response = await this.client.get(
       `${SunoApi.BASE_URL}/api/clip/${clipId}`
@@ -979,7 +1609,20 @@ class SunoApi {
     return response.data;
   }
 
-  public async get_credits(): Promise<object> {
+  /**
+   * Get account credit balance and usage information.
+   * Shows remaining credits, billing period, and monthly limits.
+   *
+   * @returns Promise resolving to object with credits_left, period, monthly_limit, and monthly_usage
+   *
+   * @example
+   * ```typescript
+   * const credits = await api.getCredits();
+   * console.log(`Credits remaining: ${credits.credits_left}`);
+   * console.log(`Monthly usage: ${credits.monthly_usage}/${credits.monthly_limit}`);
+   * ```
+   */
+  public async getCredits(): Promise<object> {
     await this.keepAlive(false);
     const response = await this.client.get(
       `${SunoApi.BASE_URL}/api/billing/info/`
@@ -992,114 +1635,84 @@ class SunoApi {
     };
   }
 
+  /**
+   * Get account credit balance and usage information.
+   *
+   * @deprecated Use getCredits() instead. This method will be removed in v2.0.0
+   * @returns Promise resolving to object with credits information
+   *
+   * @example
+   * ```typescript
+   * // Don't use this - use getCredits() instead
+   * const credits = await api.get_credits();
+   * ```
+   */
+  public async get_credits(): Promise<object> {
+    logger.warn('get_credits() is deprecated, use getCredits() instead');
+    return this.getCredits();
+  }
+
+  /**
+   * Get information about a Suno persona including their clips with pagination.
+   * Personas are voice/style profiles that can be used for consistent song generation.
+   *
+   * @param personaId - ID of the persona to retrieve
+   * @param page - Page number for paginated results. Defaults to 1
+   * @returns Promise resolving to PersonaResponse with persona details and clips
+   * @throws Error if personaId is invalid, page is not a number, or API request fails
+   *
+   * @example
+   * ```typescript
+   * const persona = await api.getPersonaPaginated('persona-id-123');
+   * console.log(persona.persona.name);
+   * console.log(`Clips: ${persona.persona.clip_count}`);
+   *
+   * // Get second page of clips
+   * const page2 = await api.getPersonaPaginated('persona-id-123', 2);
+   * ```
+   */
   public async getPersonaPaginated(personaId: string, page: number = 1): Promise<PersonaResponse> {
+    validateRequiredString(personaId, 'personaId');
+    validateNumber(page, 'page');
     await this.keepAlive(false);
-    
+
     const url = `${SunoApi.BASE_URL}/api/persona/get-persona-paginated/${personaId}/?page=${page}`;
-    
+
     logger.info(`Fetching persona data: ${url}`);
-    
+
     const response = await this.client.get(url, {
-      timeout: 10000 // 10 seconds timeout
+      timeout: SunoApi.TIMEOUTS.API_PERSONA
     });
 
     if (response.status !== 200) {
-      throw new Error('Error response: ' + response.statusText);
+      throw new Error(`Error response: ${response.statusText}`);
     }
 
     return response.data;
   }
-
-  // --------------------------- upload mp3 file ---------------------------
-  // 检查上传结果
-  private async getUploadFileResult(fileKey: string): Promise<any> {
-    await this.keepAlive(false);
-    const response = await this.client.get(
-      `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/`
-    )
-    if (response.status == 200 && response.data.status == 'complete') {
-      return {status: 'complete', audioUrl: response.data.audio_url};
-    }
-    return {status: 'pending'};
-  }
-
-  // 上传文件到Aws
-  // form 表单数据上传，接收二进制文件
-  public async uploadFileToAws(base64File: string, fileName: string, fileType: string): Promise<any> {
-    const awsInfoResponse = await this.client.post(
-      `${SunoApi.BASE_URL}/api/uploads/audio/`,
-      {
-        extension: fileType
-      }
-    );
-    if (awsInfoResponse.status != 200) {
-      throw new Error('Error response status:' + awsInfoResponse.status);
-    }
-    const uploadInfo = awsInfoResponse.data;
-
-    // 上传到 aws
-    const field = uploadInfo.fields;
-    const form = new FormData();
-    form.append('Content-Type', field['Content-Type']);
-    form.append('key', field.key);
-    form.append('AWSAccessKeyId', field.AWSAccessKeyId);
-    form.append('policy', field.policy);
-    form.append('signature', field.signature);
-      
-    const fileTemp = base64ToFile(base64File, fileName, field['Content-Type']);
-    form.append('file', fileTemp);
-    const awsResponse = await this.client.post(
-      uploadInfo.url,
-      form
-    );
-    if (awsResponse.status != 204) {
-      throw new Error('Error response status:' + awsResponse.status);
-    }
-    
-    // 请求到 suno
-    let fileKey = field.key.split('/')[1]
-    fileKey = fileKey.split('.')[0]; // 去掉后缀
-    const url = `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/upload-finish/`;
-    const response = await this.client.post(
-      url,
-      {upload_type:"file_upload",upload_filename:fileName}
-    );
-    if (response.status != 200) {
-      throw new Error('Error response status:' + response.status);
-    }
-
-    // 轮询结果
-    let uploadResult = await this.getUploadFileResult(fileKey);
-    const startTime = Date.now();
-    while (uploadResult.status == 'pending' && (Date.now() - startTime) < 60000) { // 最多等1分钟
-      await sleep(3, 6);
-      uploadResult = await this.getUploadFileResult(fileKey);
-    }
-    if (uploadResult.status != 'complete') {
-      throw new Error('Upload file processing timeout or failed');
-    }
-
-    // initialize 生成clip id
-    const initResponse = await this.client.post(
-      `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/initialize-clip/`,
-      {}
-    );
-    if (initResponse.status != 200) {
-      throw new Error('Error response status:' + initResponse.status);
-    }
-
-    // 返回key
-    return { 
-      clip_id: initResponse.data.clip_id,
-      file_name: fileName,
-      file_type: fileType
-    }; 
-  }
-
-  // -------------------- 上传文件结束--------------------
-
 }
 
+/**
+ * Factory function to get a cached SunoApi instance.
+ * Creates and initializes a new instance if one doesn't exist for the given cookie.
+ * Uses per-cookie caching to reuse instances and maintain session state.
+ *
+ * @param cookie - Optional Suno authentication cookie. Falls back to SUNO_COOKIE environment variable
+ * @returns Promise resolving to initialized and cached SunoApi instance
+ * @throws Error if no valid cookie provided or initialization fails
+ *
+ * @example
+ * ```typescript
+ * // Use environment variable cookie
+ * const api = await sunoApi();
+ *
+ * // Use custom cookie
+ * const api2 = await sunoApi('custom_cookie_value');
+ *
+ * // Subsequent calls with same cookie return cached instance
+ * const sameApi = await sunoApi(); // Returns cached instance
+ * ```
+ */
 export const sunoApi = async (cookie?: string) => {
   const resolvedCookie = cookie && cookie.includes('__client') ? cookie : process.env.SUNO_COOKIE; // Check for bad `Cookie` header (It's too expensive to actually parse the cookies *here*)
   if (!resolvedCookie) {
