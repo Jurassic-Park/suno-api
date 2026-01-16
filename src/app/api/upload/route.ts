@@ -26,16 +26,7 @@ export async function POST(req: NextRequest) {
       });
     } catch (error: any) {
       console.error('Error upload:', error);
-      if (error.response.status === 402) {
-        return new NextResponse(JSON.stringify({ error: error.response.data.detail }), {
-          status: 402,
-          headers: {
-            'Content-Type': 'application/json',
-            ...corsHeaders
-          }
-        });
-      }
-      return new NextResponse(JSON.stringify({ error: 'Internal server error: ' + JSON.stringify(error.response.data.detail) }), {
+      return new NextResponse(JSON.stringify({ error: 'Internal server error: ' + error }), {
         status: 500,
         headers: {
           'Content-Type': 'application/json',

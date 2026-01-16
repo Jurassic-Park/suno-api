@@ -489,11 +489,12 @@ class SunoApi {
   private async getAuthToken() {
     logger.info('Getting the session ID from auth.suno.com');
     // URL to get session ID
-    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?_is_native=true&_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
+    const getSessionUrl = `${SunoApi.CLERK_BASE_URL}/v1/client?_clerk_js_version=${SunoApi.CLERK_VERSION}&__clerk_api_version=${SunoApi.CLERK_API_VERSION}`;
     // Get session ID
     const sessionResponse = await this.client.get(getSessionUrl, {
-      headers: { Authorization: this.cookies.__client }
+      // headers: { Authorization: '' }
     });
+    console.log(sessionResponse);
     if (!sessionResponse?.data?.response?.last_active_session_id) {
       throw new Error(
         'Failed to get session id, you may need to update the SUNO_COOKIE'
@@ -1784,15 +1785,20 @@ class SunoApi {
       throw new Error('Error response status:' + response.status);
     }
 
-    // 轮询结果
-    let uploadResult = await this.getUploadFileResult(fileKey);
-    const startTime = Date.now();
-    while (uploadResult.status == 'pending' && (Date.now() - startTime) < 60000) { // 最多等1分钟
-      await sleep(3, 6);
-      uploadResult = await this.getUploadFileResult(fileKey);
-    }
-    if (uploadResult.status != 'complete') {
-      throw new Error('Upload file processing timeout or failed');
+    try {
+      // 轮询结果
+      let uploadResult = await this.getUploadFileResult(fileKey);
+      const startTime = Date.now();
+      while (uploadResult.status == 'pending' && (Date.now() - startTime) < 60000) { // 最多等1分钟
+        await sleep(3, 6);
+        uploadResult = await this.getUploadFileResult(fileKey);
+      }
+      if (uploadResult.status != 'complete') {
+        throw new Error('Upload file processing timeout or failed');
+      }
+    } catch (error) {
+      console.log('Upload file processing error:', toError(error).message);
+      throw new Error('上传失败，请检查文件格式或大小是否符合要求');
     }
 
     // initialize 生成clip id

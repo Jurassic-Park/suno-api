@@ -21,22 +21,8 @@ export async function POST(req: NextRequest) {
         }
       });
     } catch (error: any) {
-      const errorMessage = error.response?.data?.detail || error.message || 'Unknown error';
-      const errorStatus = error.response?.status || 500;
-
-      console.error('Error generating lyrics:', errorMessage);
-
-      if (errorStatus === 402) {
-        return new NextResponse(JSON.stringify({ error: errorMessage }), {
-          status: 402,
-          headers: {
-            'Content-Type': 'application/json',
-            ...corsHeaders
-          }
-        });
-      }
-      return new NextResponse(JSON.stringify({ error: 'Internal server error: ' + errorMessage }), {
-        status: errorStatus,
+      return new NextResponse(JSON.stringify({ error: 'Internal server error: ' + error}), {
+        status: 500,
         headers: {
           'Content-Type': 'application/json',
           ...corsHeaders
