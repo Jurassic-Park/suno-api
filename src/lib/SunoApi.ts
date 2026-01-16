@@ -2,7 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import UserAgent from 'user-agents';
 import pino from 'pino';
 import yn from 'yn';
-import { base64ToFile, isPage, sleep, waitForRequests } from '@/lib/utils';
+import { base64ToFile, isPage, sleep, urlToFile, waitForRequests } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
 import { Solver } from '@2captcha/captcha-solver';
@@ -328,6 +328,8 @@ interface GenerateSongsPayload {
   title?: string;
   negative_tags?: string;
   gpt_description_prompt?: string;
+  cover_clip_id?: string;
+  vocal_gender?: string;
 }
 
 /**
@@ -441,7 +443,7 @@ class SunoApi {
       }
     });
     this.client.interceptors.request.use(config => {
-      if (this.currentToken && !config.headers.Authorization)
+      if (config.url?.includes('suno.com') && this.currentToken && !config.headers.Authorization)
         config.headers.Authorization = `Bearer ${this.currentToken}`;
       const cookiesArray = Object.entries(this.cookies).map(([key, value]) =>
         cookie.serialize(key, value as string)
@@ -1216,6 +1218,12 @@ class SunoApi {
     validateRequiredString(title, 'title');
     validateOptionalString(model, 'model');
     validateOptionalString(negative_tags, 'negative_tags');
+
+    var task = '';
+    if (cover_clip_id && cover_clip_id.trim() !== '') {
+      task = 'cover';
+    }
+
     const startTime = Date.now();
     const audios = await this.generateSongs(
       prompt,
@@ -1225,7 +1233,12 @@ class SunoApi {
       make_instrumental,
       model,
       wait_audio,
-      negative_tags
+      negative_tags,
+      task,
+      '',
+      undefined, 
+      cover_clip_id,
+      vocal_gender
     );
     const costTime = Date.now() - startTime;
     logger.info(
@@ -1286,6 +1299,8 @@ class SunoApi {
       generation_type: task === 'extend' ? 'EXTEND' : 'TEXT',
       continue_at: continue_at,
       continue_clip_id: continue_clip_id,
+      cover_clip_id: cover_clip_id,
+      vocal_gender: vocal_gender,
       task: task,
       token: await this.getCaptcha()
     };
@@ -1737,9 +1752,18 @@ class SunoApi {
     form.append('AWSAccessKeyId', field.AWSAccessKeyId);
     form.append('policy', field.policy);
     form.append('signature', field.signature);
-      
-    const fileTemp = base64ToFile(base64File, fileName, field['Content-Type']);
-    form.append('file', fileTemp);
+    
+    // 是否包含https
+    if (base64File.startsWith('http://') || base64File.startsWith('https://')) {
+      // 从url下载文件
+      // const fileTemp = await urlToFile(base64File, fileName, field['Content-Type']);
+      const fileTemp = await urlToFile(base64File, fileName, field['Content-Type']);
+      form.append('file', fileTemp);
+    } else {
+      // base64字符串转文件
+      const fileTemp = base64ToFile(base64File, fileName, field['Content-Type']);
+      form.append('file', fileTemp);
+    }
     const awsResponse = await this.client.post(
       uploadInfo.url,
       form

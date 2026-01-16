@@ -128,3 +128,15 @@ export const base64ToFile = (base64: string, filename: string, mimeType: string)
   const file = new File([buffer], filename, { type: mimeType });
   return file;
 }
+
+/**
+ * 远程url转换为File对象
+ * @param url - 远程文件的URL
+ * @param filename - 文件名
+ */
+export const urlToFile = async (url: string, filename: string, mimeType: string): Promise<File> => {
+  const response = await fetch(url);
+  const blob = await response.blob();
+  const file = new File([blob], filename, { type: mimeType });
+  return file;
+}
