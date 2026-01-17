@@ -1717,7 +1717,6 @@ class SunoApi {
   // --------------------------- upload mp3 file ---------------------------
   // 检查上传结果
   private async getUploadFileResult(fileKey: string): Promise<any> {
-    await this.keepAlive(false);
     const response = await this.client.get(
       `${SunoApi.BASE_URL}/api/uploads/audio/${fileKey}/`
     )
@@ -1734,6 +1733,7 @@ class SunoApi {
     validateRequiredString(fileName, 'fileName');
     validateRequiredString(fileType, 'fileType');
 
+    await this.keepAlive(false);
     const awsInfoResponse = await this.client.post(
       `${SunoApi.BASE_URL}/api/uploads/audio/`,
       {

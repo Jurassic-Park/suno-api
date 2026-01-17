@@ -136,6 +136,9 @@ export const base64ToFile = (base64: string, filename: string, mimeType: string)
  */
 export const urlToFile = async (url: string, filename: string, mimeType: string): Promise<File> => {
   const response = await fetch(url);
+  if (response.status !== 200) {
+    throw new Error('Failed to fetch file from URL: ' + url);
+  }
   const blob = await response.blob();
   const file = new File([blob], filename, { type: mimeType });
   return file;
