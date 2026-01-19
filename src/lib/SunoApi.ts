@@ -517,6 +517,8 @@ class SunoApi {
    * ```
    */
   public async keepAlive(isWait?: boolean): Promise<void> {
+    await this.keepAliveV2(isWait);
+    return;
     if (!this.sid) {
       throw new Error('Session ID is not set. Cannot renew token.');
     }
@@ -531,6 +533,29 @@ class SunoApi {
       await sleep(SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MIN, SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MAX);
     }
     const newToken = renewResponse.data.jwt;
+    // Update Authorization field in request header with the new JWT token
+    this.currentToken = newToken;
+  }
+
+  /**
+   * Renew the session token to keep the authentication active (V2).
+   * @param isWait 
+   */
+  public async keepAliveV2(isWait?: boolean): Promise<void> {
+    if (!this.sid) {
+      throw new Error('Session ID is not set. Cannot renew token.');
+    }
+    // URL to renew session token
+    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/touch?__clerk_api_version=${SunoApi.CLERK_API_VERSION}&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+    // Renew session token
+    logger.info('KeepAlivev2...\n');
+    const renewResponse = await this.client.post(renewUrl, {}, {
+      headers: { Authorization: this.cookies.__client }
+    });
+    if (isWait) {
+      await sleep(SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MIN, SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MAX);
+    }
+    const newToken = renewResponse.data.response.last_active_token.jwt;
     // Update Authorization field in request header with the new JWT token
     this.currentToken = newToken;
   }
@@ -1733,7 +1758,7 @@ class SunoApi {
     validateRequiredString(fileName, 'fileName');
     validateRequiredString(fileType, 'fileType');
 
-    await this.keepAlive(false);
+    await this.keepAliveV2(false);
     const awsInfoResponse = await this.client.post(
       `${SunoApi.BASE_URL}/api/uploads/audio/`,
       {
