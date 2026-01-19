@@ -449,6 +449,7 @@ class SunoApi {
         cookie.serialize(key, value as string)
       );
       config.headers.Cookie = cookiesArray.join('; ');
+      console.log('sending request to', config.url);
       return config;
     });
     this.client.interceptors.response.use(resp => {
