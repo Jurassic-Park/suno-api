@@ -416,11 +416,11 @@ class SunoApi {
   // redis
   private static readonly REDISKEY = {
     // captcha 状态： 0， 未启动，1， 启动中，2,等待任务 3，运行中 4，异常
-    CAPTCHA_STATUS: 'suno_api_captcha_status',
+    CAPTCHA_STATUS: 'h5activity_cache:suno_api_captcha_status',
     // 最近任务唯一码
-    CAPTCHA_LAST_TASK: 'suno_api_captcha_last_task',
+    CAPTCHA_LAST_TASK: 'h5activity_cache:suno_api_captcha_last_task',
     // 最近任务token
-    CAPTCHA_LAST_TOKEN: 'suno_api_captcha_last_token',
+    CAPTCHA_LAST_TOKEN: 'h5activity_cache:suno_api_captcha_last_token',
   } as const;
 
   private readonly client: AxiosInstance;
@@ -489,8 +489,8 @@ class SunoApi {
    */
   public async init(): Promise<SunoApi> {
     //await this.getClerkLatestVersion();
-    // await this.getAuthToken();
-    // await this.keepAlive();
+    await this.getAuthToken();
+    await this.keepAlive();
     return this;
   }
 
@@ -2286,6 +2286,26 @@ export const sunoApi = async (cookie?: string) => {
 
   // If not, create a new instance and initialize it
   const instance = await new SunoApi(resolvedCookie).init();
+  // Cache the initialized instance
+  cache.set(resolvedCookie, instance);
+
+  return instance;
+};
+
+export const sunoApiNoInit = async (cookie?: string) => {
+  const resolvedCookie = cookie && cookie.includes('__client') ? cookie : process.env.SUNO_COOKIE; // Check for bad `Cookie` header (It's too expensive to actually parse the cookies *here*)
+  if (!resolvedCookie) {
+    logger.info('No cookie provided! Aborting...\nPlease provide a cookie either in the .env file or in the Cookie header of your request.')
+    throw new Error('Please provide a cookie either in the .env file or in the Cookie header of your request.');
+  }
+
+  // Check if the instance for this cookie already exists in the cache
+  const cachedInstance = cache.get(resolvedCookie);
+  if (cachedInstance)
+    return cachedInstance;
+
+  // If not, create a new instance and initialize it
+  const instance = new SunoApi(resolvedCookie);
   // Cache the initialized instance
   cache.set(resolvedCookie, instance);
 

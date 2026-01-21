@@ -1,5 +1,5 @@
 import { NextResponse, NextRequest } from "next/server";
-import { sunoApi } from "@/lib/SunoApi";
+import { sunoApi, sunoApiNoInit } from "@/lib/SunoApi";
 import { corsHeaders, sleep } from "@/lib/utils";
 import { get } from "http";
 import { getRedisInstance } from "@/lib/redis";
@@ -27,8 +27,7 @@ export async function GET(req: NextRequest) {
       // console.log(await redisInstance.get('captcha_v2_token'));
       // return;
 
-
-      (await sunoApi()).getCaptchaV2();
+      (await sunoApiNoInit()).getCaptchaV2();
 
       return new NextResponse('{}', {
         status: 200,
