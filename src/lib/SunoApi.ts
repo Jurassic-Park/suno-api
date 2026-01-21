@@ -1306,6 +1306,58 @@ class SunoApi {
       }
     });
 
+      // Find and fill the textarea - try multiple selectors
+      // logger.info('Looking for song description textarea...');
+      // let textarea;
+      // try {
+      //   // Try original selector first
+      //   textarea = page.locator('textarea[placeholder*="song"]');
+      //   await textarea.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.TEXTAREA_WAIT });
+      //   logger.info('Found textarea with Hip-hop placeholder');
+      // } catch(e) {
+      //   logger.info('Hip-hop placeholder not found, trying alternative selectors...');
+      //   // Try finding any visible textarea on the page
+      //   const textareas = page.locator('textarea');
+      //   const count = await textareas.count();
+      //   logger.info(`Found ${count} textareas on page`);
+
+      //   // Usually the song description textarea is the first or second one
+      //   for (let i = 0; i < count; i++) {
+      //     const ta = textareas.nth(i);
+      //     if (await ta.isVisible()) {
+      //       textarea = ta;
+      //       logger.info(`Using textarea at index ${i}`);
+      //       break;
+      //     }
+      //   }
+
+      //   if (!textarea) {
+      //     throw new Error('Could not find any visible textarea on the page');
+      //   }
+      // }
+
+      // logger.info('Filling textarea with test prompt...');
+
+    // 设置启动完成
+    redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
+
+    while (true) {
+      // 获取是否有新任务：只有当task存在且token为空时，才进行新任务
+      const task = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
+      const token = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
+      if (!task || (task && token)) {
+        logger.info('No new CAPTCHA task found, waiting 5 seconds...');
+        await sleep(3);
+        continue;
+      }
+
+      logger.info('Looking for Create button...');
+      const button = page.locator('button[aria-label="Create song"]');
+      await button.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.CREATE_BUTTON_WAIT });
+      logger.info('Clicking Create button...');
+      await button.click();
+      logger.info('Create button clicked - waiting for CAPTCHA...');
+
     const tokenPromise = new Promise<GenerateSongsV2Payload|null>((resolve, reject) => {
       // Try multiple patterns to catch the generate request
       const patterns = [
@@ -1375,58 +1427,6 @@ class SunoApi {
       });
     });
 
-
-      // Find and fill the textarea - try multiple selectors
-      // logger.info('Looking for song description textarea...');
-      // let textarea;
-      // try {
-      //   // Try original selector first
-      //   textarea = page.locator('textarea[placeholder*="song"]');
-      //   await textarea.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.TEXTAREA_WAIT });
-      //   logger.info('Found textarea with Hip-hop placeholder');
-      // } catch(e) {
-      //   logger.info('Hip-hop placeholder not found, trying alternative selectors...');
-      //   // Try finding any visible textarea on the page
-      //   const textareas = page.locator('textarea');
-      //   const count = await textareas.count();
-      //   logger.info(`Found ${count} textareas on page`);
-
-      //   // Usually the song description textarea is the first or second one
-      //   for (let i = 0; i < count; i++) {
-      //     const ta = textareas.nth(i);
-      //     if (await ta.isVisible()) {
-      //       textarea = ta;
-      //       logger.info(`Using textarea at index ${i}`);
-      //       break;
-      //     }
-      //   }
-
-      //   if (!textarea) {
-      //     throw new Error('Could not find any visible textarea on the page');
-      //   }
-      // }
-
-      // logger.info('Filling textarea with test prompt...');
-
-    // 设置启动完成
-    redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
-
-    while (true) {
-      // 获取是否有新任务：只有当task存在且token为空时，才进行新任务
-      const task = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
-      const token = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
-      if (!task || (task && token)) {
-        logger.info('No new CAPTCHA task found, waiting 5 seconds...');
-        await sleep(3);
-        continue;
-      }
-
-      logger.info('Looking for Create button...');
-      const button = page.locator('button[aria-label="Create song"]');
-      await button.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.CREATE_BUTTON_WAIT });
-      logger.info('Clicking Create button...');
-      await button.click();
-      logger.info('Create button clicked - waiting for CAPTCHA...');
 
       // Store the CAPTCHA solving promise to ensure it's properly handled
       const captchaSolvingPromise = new Promise<void>(async (resolve, reject) => {
