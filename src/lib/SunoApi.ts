@@ -1312,8 +1312,12 @@ class SunoApi {
             const headers = request.headers();
             const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
 
-            logger.debug('Request headers', sanitize(headers));
-            logger.debug('Request post data', sanitize(postData));
+            // logger.info('Request headers', sanitize(headers));
+            logger.info('Request post data', sanitize(postData));
+
+            // 获取headers中的authorization
+            // 获取postData中的所有值
+            logger.info('Authorization header', headers.authorization);
 
             // Extract token from post data if it exists
             const token = postData?.token || postData?.hcaptcha_token;
