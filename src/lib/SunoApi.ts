@@ -1679,7 +1679,7 @@ class SunoApi {
         continue;
       }
       // 设置运行中，并生成token
-      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_STATUS, 30, '3'); // 运行中
+      await redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '3'); // 运行中
       await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 30, ''); // 清空token
       // 当时时间戳+随机数作为任务ID
       const taskId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
@@ -1696,22 +1696,14 @@ class SunoApi {
 
     let attempts = 0;
     while (true) {
-      if (attempts >= 20) {
+      if (attempts >= 50) {
         throw new Error('Failed to get CAPTCHA token after multiple attempts');
       }
 
       attempts++;
 
-      const redisStatus = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_STATUS);
       const lastToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
       const lastTask = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
-
-      // 状态不是运行中，继续等待
-      if (redisStatus !== '2') {
-        logger.info('Token generator not finish, waiting 1 seconds...');
-        await sleep(1);
-        continue;
-      }
 
       // 任务ID不匹配，继续等待
       if (lastTask !== taskId) {
