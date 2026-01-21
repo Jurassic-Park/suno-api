@@ -288,6 +288,15 @@ interface PersonaResponse {
 }
 
 /**
+ * v2-web request data
+ */
+interface GenerateSongsV2Payload {
+  auth_token: string;
+  hcaptcha_token: string;
+  data: string;
+}
+
+/**
  * Coordinate data returned from 2Captcha solver
  */
 interface CaptchaCoordinate {
@@ -423,6 +432,8 @@ class SunoApi {
     CAPTCHA_LAST_TOKEN: 'h5activity_cache:suno_api_captcha_last_token',
     // auth token
     CAPTCHA_AUTH_TOKEN: 'h5activity_cache:suno_api_captcha_auth_token',
+    // 请求数据
+    CAPTCHA_REQUEST_DATA: 'h5activity_cache:suno_api_captcha_request_data',
   } as const;
 
   private readonly client: AxiosInstance;
@@ -1295,7 +1306,7 @@ class SunoApi {
       }
     });
 
-    const tokenPromise = new Promise<string|null>((resolve, reject) => {
+    const tokenPromise = new Promise<GenerateSongsV2Payload|null>((resolve, reject) => {
       // Try multiple patterns to catch the generate request
       const patterns = [
         '**/api/generate/v2/**',
@@ -1314,8 +1325,11 @@ class SunoApi {
             const headers = request.headers();
             const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
 
+            // 变string返回
+            const postDataString = request.postData();
+
             // logger.info('Request headers', sanitize(headers));
-            logger.info(`Request post data ${postData}`);
+            logger.info(`Request post data ${postDataString}`);
 
             // 获取headers中的authorization
             // 获取postData中的所有值
@@ -1342,8 +1356,16 @@ class SunoApi {
             //   logger.warn('Browser instance not available for cleanup during route interception');
             // }
             // controller.abort();
-
-            resolve(token || null);
+            if (token) {
+              const payload: GenerateSongsV2Payload = {
+                auth_token: this.currentToken || '',
+                hcaptcha_token: token,
+                data: postDataString || ''
+              };
+              resolve(payload);
+            } else {
+              resolve(null);
+            }
           } catch(err) {
             const error = toError(err);
             logger.error(`Route interception error: ${error.message}`);
@@ -1395,7 +1417,7 @@ class SunoApi {
       const token = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
       if (!task || (task && token)) {
         logger.info('No new CAPTCHA task found, waiting 5 seconds...');
-        await sleep(5);
+        await sleep(3);
         continue;
       }
 
@@ -1481,13 +1503,14 @@ class SunoApi {
       // This ensures proper coordination between token extraction and CAPTCHA solving
       try {
         await Promise.race([tokenPromise, captchaSolvingPromise]);
-        let token = await tokenPromise
-        if (token) {
-          console.log('获取到验证码token:', token);
+        let req = await tokenPromise
+        if (req) {
+          console.log('获取到验证码token:', req.hcaptcha_token);
           // 回到create页面，准备下一个任务
-          token = token || '-1';
-          redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 10, token);
-          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN, this.currentToken ?? ''); // 清空任务
+          req.hcaptcha_token = req.hcaptcha_token === '-1' ? '' : req.hcaptcha_token;
+          redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 10, req.hcaptcha_token); // 设置token，10秒过期
+          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN, req.auth_token); // 清空任务
+          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_REQUEST_DATA, req.data); // 清空任务
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
           await this.mustGetCreatePage(page);
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
@@ -1698,7 +1721,7 @@ class SunoApi {
   /**
    * 获取验证码token
    */
-  private async getTokenByTaskId(taskId: string): Promise<any> {
+  private async getTokenByTaskId(taskId: string): Promise<GenerateSongsV2Payload> {
     const redisInstance = getRedisInstance();
 
     let attempts = 0;
@@ -1733,11 +1756,20 @@ class SunoApi {
         this.currentToken = authToken;
       }
 
+      const requestData = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_REQUEST_DATA);
+
       // 获取到token，重置状态
       // await redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2'); // 就绪
       await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TASK, 5, ''); // 清空任务
       await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN,5, ''); // 清空token
-      return lastToken === '-1' ? null : lastToken;
+      /// return lastToken === '-1' ? null : lastToken;
+
+      const payload: GenerateSongsV2Payload = {
+        auth_token: authToken || '',
+        hcaptcha_token: lastToken,
+        data: requestData || ''
+      };
+      return payload;
     }
   }
 
@@ -1790,33 +1822,41 @@ class SunoApi {
 
     // [v5 Security] create session token, transaction ID
     const sessionToken = await this.getSessionToken();
-    const transactionId = randomUUID();
 
-    const reqToken = await this.getTokenByTaskId(taskId);
-    const payload: any = {
-      // token: await this.getCaptcha(),
-      token: reqToken,
-      generation_type: 'TEXT',
-      title: title || '',
-      tags: tags || '',
-      negative_tags: negative_tags || '',
-      mv:  model || DEFAULT_MODEL,
-      prompt: prompt,
-      make_instrumental: make_instrumental,
-      user_uploaded_images_b64: null,
-      metadata: {
-        web_client_pathname: '/create',
-        is_max_mode: false,
-        is_mumble: false,
-        create_mode: isCustom ? 'custom' : 'normal',
-        create_session_token: sessionToken, // required
-        disable_volume_normalization: false,
-        can_control_sliders: ["weirdness_constraint", "style_weight"]
-        // exclude user_tier cause it could be optional (if error, need to fix it)
-      },
-      override_fields: [],
-      transaction_uuid: transactionId
-    };
+    const req = await this.getTokenByTaskId(taskId);
+
+    // string 转json
+    const payload = JSON.parse(req.data || '{}');
+    payload.title = title || '';
+    payload.tags = tags || '';
+    payload.negative_tags = negative_tags || '';
+    payload.make_instrumental = make_instrumental;
+    payload.mv = model || DEFAULT_MODEL;
+
+    // const payload: any = {
+    //   // token: await this.getCaptcha(),
+    //   token: req,
+    //   generation_type: 'TEXT',
+    //   title: title || '',
+    //   tags: tags || '',
+    //   negative_tags: negative_tags || '',
+    //   mv:  model || DEFAULT_MODEL,
+    //   prompt: prompt,
+    //   make_instrumental: make_instrumental,
+    //   user_uploaded_images_b64: null,
+    //   metadata: {
+    //     web_client_pathname: '/create',
+    //     is_max_mode: false,
+    //     is_mumble: false,
+    //     create_mode: isCustom ? 'custom' : 'normal',
+    //     create_session_token: sessionToken, // required
+    //     disable_volume_normalization: false,
+    //     can_control_sliders: ["weirdness_constraint", "style_weight"]
+    //     // exclude user_tier cause it could be optional (if error, need to fix it)
+    //   },
+    //   override_fields: [],
+    //   transaction_uuid: transactionId
+    // };
     if (task === 'extend') {
       payload.continue_clip_id = continue_clip_id;
       payload.continue_at = continue_at;
@@ -1830,7 +1870,10 @@ class SunoApi {
       payload.title = title;
       payload.negative_tags = negative_tags;
       payload.prompt = prompt;
+      payload.metadata.create_mode = 'custom';
     } else {
+      payload.metadata.create_mode = 'simple';
+      payload.prompt = "";
       payload.gpt_description_prompt = prompt;
     }
     logger.info('generateSongs payload', sanitize(payload));
