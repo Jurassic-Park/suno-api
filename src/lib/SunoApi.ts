@@ -1480,7 +1480,7 @@ class SunoApi {
           console.log('获取到验证码token:', token);
           // 回到create页面，准备下一个任务
           token = token || '-1';
-          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, token);
+          redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 10, token);
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
           await this.mustGetCreatePage(page);
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
@@ -1651,6 +1651,91 @@ class SunoApi {
   }
 
   /**
+   * 获取 线程唯一的任务ID
+   */
+  private async genTaskId(): Promise<string> {
+    const redisInstance = getRedisInstance();
+    const redisStatus = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_STATUS);
+
+    let attempts = 0;
+    while (true) {
+      if (attempts >= 15) {
+        throw new Error('Failed to generate task ID after multiple attempts');
+      }
+
+      attempts++;
+
+      if (redisStatus !== '2') {
+        logger.info('Token generator not ready, waiting 1 seconds...');
+        await sleep(1);
+        continue;
+      }
+
+      const lastToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
+      const lastTask = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
+      // 两者都存在，未获取
+      if (lastTask && lastToken) {
+        await sleep(1); // 等待1秒再检查
+        continue;
+      }
+      // 设置运行中，并生成token
+      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_STATUS, 30, '3'); // 运行中
+      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 30, ''); // 清空token
+      // 当时时间戳+随机数作为任务ID
+      const taskId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TASK, 30, taskId);
+      return taskId;
+    }
+  }
+
+  /**
+   * 获取验证码token
+   */
+  private async getTokenByTaskId(taskId: string): Promise<any> {
+    const redisInstance = getRedisInstance();
+
+    let attempts = 0;
+    while (true) {
+      if (attempts >= 20) {
+        throw new Error('Failed to get CAPTCHA token after multiple attempts');
+      }
+
+      attempts++;
+
+      const redisStatus = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_STATUS);
+      const lastToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
+      const lastTask = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
+
+      // 状态不是运行中，继续等待
+      if (redisStatus !== '2') {
+        logger.info('Token generator not finish, waiting 1 seconds...');
+        await sleep(1);
+        continue;
+      }
+
+      // 任务ID不匹配，继续等待
+      if (lastTask !== taskId) {
+        logger.info('Waiting for matching task ID...');
+        await sleep(1);
+        continue;
+      }
+
+      // token不存在，继续等待
+      if (!lastToken || lastToken === '') {
+        logger.info('Waiting for CAPTCHA token to be generated...');
+        await sleep(1);
+        continue;
+      }
+
+      // 获取到token，重置状态
+      // await redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2'); // 就绪
+      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TASK, 5, ''); // 清空任务
+      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN,5, ''); // 清空token
+      return lastToken === '-1' ? null : lastToken;
+    }
+  }
+
+  /**
    * Generates songs based on the provided parameters.
    *
    * @param prompt The text prompt to generate songs from.
@@ -1693,7 +1778,11 @@ class SunoApi {
       validateRequiredString(cover_clip_id, 'cover_clip_id (required when task is "cover")');
     }
 
+    const taskId = await this.genTaskId();
     await this.keepAlive();
+
+    const reqToken = await this.getTokenByTaskId(taskId);
+
     const payload: Partial<GenerateSongsPayload> = {
       make_instrumental: make_instrumental,
       mv: model || DEFAULT_MODEL,
@@ -1704,7 +1793,7 @@ class SunoApi {
       cover_clip_id: cover_clip_id,
       vocal_gender: vocal_gender,
       task: task,
-      token: await this.getCaptcha()
+      token: reqToken
     };
     if (isCustom) {
       payload.tags = tags;
