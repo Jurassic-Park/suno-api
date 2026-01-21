@@ -1705,6 +1705,7 @@ class SunoApi {
       const lastToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
       const lastTask = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
 
+      logger.info(`Checking for token... Attempt ${attempts} - Last Task: ${lastTask}, Last Token: ${lastToken ? 'Exists  ' : 'None'}`);
       // 任务ID不匹配，继续等待
       if (lastTask !== taskId) {
         logger.info('Waiting for matching task ID...');
