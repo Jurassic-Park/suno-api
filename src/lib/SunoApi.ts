@@ -1781,7 +1781,8 @@ class SunoApi {
 
     const reqToken = await this.getTokenByTaskId(taskId);
     const payload: any = {
-      token: await this.getCaptcha(),
+      // token: await this.getCaptcha(),
+      token: reqToken,
       generation_type: 'TEXT',
       title: title || '',
       tags: tags || '',
