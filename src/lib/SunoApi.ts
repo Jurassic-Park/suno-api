@@ -421,6 +421,8 @@ class SunoApi {
     CAPTCHA_LAST_TASK: 'h5activity_cache:suno_api_captcha_last_task',
     // 最近任务token
     CAPTCHA_LAST_TOKEN: 'h5activity_cache:suno_api_captcha_last_token',
+    // auth token
+    CAPTCHA_AUTH_TOKEN: 'h5activity_cache:suno_api_captcha_auth_token',
   } as const;
 
   private readonly client: AxiosInstance;
@@ -1313,11 +1315,11 @@ class SunoApi {
             const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
 
             // logger.info('Request headers', sanitize(headers));
-            logger.info('Request post data', postData);
+            logger.info(`Request post data ${postData}`);
 
             // 获取headers中的authorization
             // 获取postData中的所有值
-            logger.info('Authorization header', headers);
+            logger.info(`Authorization header ${headers.authorization}`);
 
             // Extract token from post data if it exists
             const token = postData?.token || postData?.hcaptcha_token;
@@ -1485,6 +1487,7 @@ class SunoApi {
           // 回到create页面，准备下一个任务
           token = token || '-1';
           redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 10, token);
+          redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN, 10, this.currentToken ?? ''); // 清空任务
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
           await this.mustGetCreatePage(page);
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
@@ -1708,6 +1711,10 @@ class SunoApi {
 
       const lastToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
       const lastTask = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
+      const authToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN);
+      if (authToken && authToken !== '') {
+        this.currentToken = authToken;
+      }
 
       logger.info(`Checking for token... Attempt ${attempts} - Last Task: ${lastTask}, Last Token: ${lastToken ? 'Exists  ' : 'None'}`);
       // 任务ID不匹配，继续等待
