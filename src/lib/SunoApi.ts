@@ -1487,7 +1487,7 @@ class SunoApi {
           // 回到create页面，准备下一个任务
           token = token || '-1';
           redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 10, token);
-          redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN, 10, this.currentToken ?? ''); // 清空任务
+          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN, this.currentToken ?? ''); // 清空任务
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
           await this.mustGetCreatePage(page);
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
@@ -1711,12 +1711,8 @@ class SunoApi {
 
       const lastToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
       const lastTask = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
-      const authToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN);
-      if (authToken && authToken !== '') {
-        this.currentToken = authToken;
-      }
 
-      logger.info(`Checking for token... Attempt ${attempts} - Last Task: ${lastTask}, Last Token: ${lastToken ? 'Exists  ' : 'None'}`);
+      logger.info(`Checking for token... Attempt ${attempts} - Last Task: ${lastTask}, Last Token: ${lastToken}`);
       // 任务ID不匹配，继续等待
       if (lastTask !== taskId) {
         logger.info('Waiting for matching task ID...');
@@ -1729,6 +1725,12 @@ class SunoApi {
         logger.info('Waiting for CAPTCHA token to be generated...');
         await sleep(1);
         continue;
+      }
+
+      const authToken = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN);
+      logger.info(`Retrieved CAPTCHA token: ${lastToken}, Auth Token: ${authToken}`);
+      if (authToken && authToken !== '') {
+        this.currentToken = authToken;
       }
 
       // 获取到token，重置状态
