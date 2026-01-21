@@ -11,6 +11,7 @@ import { BrowserContext, Page, Locator, chromium, firefox } from 'rebrowser-play
 import { createCursor, Cursor } from 'ghost-cursor-playwright';
 import { promises as fs } from 'fs';
 import path from 'node:path';
+import { getRedisInstance } from './redis';
 
 // sunoApi instance caching
 const globalForSunoApi = global as unknown as { sunoApiCache?: Map<string, SunoApi> };
@@ -373,7 +374,7 @@ class SunoApi {
     /** Timeout for textarea visibility */
     TEXTAREA_WAIT: Number(process.env.TIMEOUT_TEXTAREA_WAIT) || 3000,
     /** Timeout for Create button visibility */
-    CREATE_BUTTON_WAIT: Number(process.env.TIMEOUT_CREATE_BUTTON_WAIT) || 5000,
+    CREATE_BUTTON_WAIT: Number(process.env.TIMEOUT_CREATE_BUTTON_WAIT) || 10000,
 
     // CAPTCHA solving timeouts
     /** Timeout for CAPTCHA challenge screenshot */
@@ -410,6 +411,16 @@ class SunoApi {
     // Overall operation timeouts
     /** Maximum time to wait for audio generation completion */
     AUDIO_GENERATION_MAX: Number(process.env.TIMEOUT_AUDIO_GENERATION_MAX) || 100000,
+  } as const;
+
+  // redis
+  private static readonly REDISKEY = {
+    // captcha 状态： 0， 未启动，1， 启动中，2,等待任务 3，运行中 4，异常
+    CAPTCHA_STATUS: 'suno_api_captcha_status',
+    // 最近任务唯一码
+    CAPTCHA_LAST_TASK: 'suno_api_captcha_last_task',
+    // 最近任务token
+    CAPTCHA_LAST_TOKEN: 'suno_api_captcha_last_token',
   } as const;
 
   private readonly client: AxiosInstance;
@@ -478,8 +489,8 @@ class SunoApi {
    */
   public async init(): Promise<SunoApi> {
     //await this.getClerkLatestVersion();
-    await this.getAuthToken();
-    await this.keepAlive();
+    // await this.getAuthToken();
+    // await this.keepAlive();
     return this;
   }
 
@@ -495,7 +506,7 @@ class SunoApi {
     const sessionResponse = await this.client.get(getSessionUrl, {
       // headers: { Authorization: '' }
     });
-    console.log(sessionResponse);
+    // console.log(sessionResponse);
     if (!sessionResponse?.data?.response?.last_active_session_id) {
       throw new Error(
         'Failed to get session id, you may need to update the SUNO_COOKIE'
@@ -546,19 +557,25 @@ class SunoApi {
     if (!this.sid) {
       throw new Error('Session ID is not set. Cannot renew token.');
     }
-    // URL to renew session token
-    const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/touch?__clerk_api_version=${SunoApi.CLERK_API_VERSION}&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
-    // Renew session token
-    logger.info('KeepAlivev2...\n');
-    const renewResponse = await this.client.post(renewUrl, {}, {
-      headers: { Authorization: this.cookies.__client }
-    });
-    if (isWait) {
-      await sleep(SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MIN, SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MAX);
+    try{
+
+      // URL to renew session token
+      const renewUrl = `${SunoApi.CLERK_BASE_URL}/v1/client/sessions/${this.sid}/touch?__clerk_api_version=${SunoApi.CLERK_API_VERSION}&_clerk_js_version=${SunoApi.CLERK_VERSION}`;
+      // Renew session token
+      logger.info('KeepAlivev2...\n');
+      const renewResponse = await this.client.post(renewUrl, {}, {
+        headers: { Authorization: this.cookies.__client }
+      });
+      if (isWait) {
+        await sleep(SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MIN, SunoApi.TIMEOUTS.KEEP_ALIVE_SLEEP_MAX);
+      }
+      const newToken = renewResponse.data.response.last_active_token.jwt;
+      // Update Authorization field in request header with the new JWT token
+      this.currentToken = newToken;
+
+    } catch (error) {
+      console.error('Error in keepAliveV2:', toError(error).message);
     }
-    const newToken = renewResponse.data.response.last_active_token.jwt;
-    // Update Authorization field in request header with the new JWT token
-    this.currentToken = newToken;
   }
 
   /**
@@ -1118,6 +1135,364 @@ class SunoApi {
     return tokenPromise;
   }
 
+  // 必须要create页
+  private async mustGetCreatePage(page: Page): Promise<void> {
+    logger.info('Navigating to suno.com/create...');
+    let navigationAttempts = 0;
+    while (true) {
+      // 如果是在create页
+      if (navigationAttempts === 1 && page.url().includes('/create')) {
+        // 是否有create按钮，且是可见的
+        await sleep(2);
+        try {
+          const createLink = page.locator('a[href*="/create"]');
+          if (await createLink.isVisible()) {
+            logger.info('Already on create page with Create link visible');
+            // 点击下面create按钮 a标签且链接包含create
+            logger.info('Clicking Create button link...');
+            await createLink.click();
+            logger.info('Create link clicked, rechecking page...');
+            await sleep(2);
+          } 
+        } catch(e) {
+          logger.info('No Create link found, already on create page');
+          continue;
+        }
+      } else {
+        navigationAttempts++;
+        logger.info(`Navigation attempt ${navigationAttempts}: Going to /create page...`);
+        try {
+          await page.goto('https://suno.com/create', { referer: 'https://suno.com/', waitUntil: 'domcontentloaded', timeout: SunoApi.TIMEOUTS.PAGE_NAVIGATION });
+
+          // Wait for the song list API call which indicates the page is ready
+          await page.waitForResponse(response =>
+            response.url().includes('/api/project/') && response.status() === 200,
+            { timeout: SunoApi.TIMEOUTS.PAGE_API_RESPONSE }
+          );
+          logger.info('Page fully loaded');
+
+          // 检查头部链接是否包含create
+          if (page.url().includes('/create')) {
+            if (page.getByLabel('Close')) {
+              logger.info('get create pages');
+            } else {
+              logger.info('On create page without Close label, retrying...');
+              continue;
+            }
+          } else {
+            logger.info('Not on create page yet, retrying...');
+            continue;
+          }
+
+        } catch(e) {
+          logger.info('API response timeout - page might not be fully loaded, continuing anyway');
+          continue;
+        }
+      }
+
+      // Find and fill the textarea - try multiple selectors
+      logger.info('Looking for song description textarea...');
+      let textarea;
+
+      let songdescTempt = 0;
+      while (true) {
+        songdescTempt++;
+        try {
+          await sleep(2);
+          // Try original selector first
+          textarea = page.locator('textarea[placeholder*="song"]');
+          await textarea.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.TEXTAREA_WAIT });
+          logger.info('Found textarea with Hip-hop placeholder');
+          await this.fillMusicDetail(textarea);
+          return;
+        } catch(e) {
+          try {
+            logger.info('Hip-hop placeholder not found, trying alternative selectors...');
+            // Try finding any visible textarea on the page
+            const textareas = page.locator('textarea');
+            const count = await textareas.count();
+            logger.info(`Found ${count} textareas on page`);
+
+            // Usually the song description textarea is the first or second one
+            for (let i = 0; i < count; i++) {
+              const ta = textareas.nth(i);
+              if (await ta.isVisible()) {
+                textarea = ta;
+                logger.info(`Using textarea at index ${i}`);
+                break;
+              }
+            }
+
+            if (!textarea) {
+              // throw new Error('Could not find any visible textarea on the page');
+              continue;
+            }
+
+            await this.fillMusicDetail(textarea);
+            return;
+          } catch {
+            logger.info('Re-navigating to create page to find textarea...');
+            continue;
+          }
+        }
+      }
+    }
+  }
+
+  // 填充音乐详情
+  private async fillMusicDetail(textarea: Locator): Promise<void> {
+      await textarea.focus();
+      const testPrompt = process.env.CAPTCHA_TEST_PROMPT || 'Lorem ipsum';
+      await textarea.fill(testPrompt);
+      logger.info('Textarea filled successfully');
+  }
+
+  // 预先打开模拟器，然后直接访问 create 页面获取验证码
+  public async getCaptchaV2(): Promise<void> {
+    const redisInstance = getRedisInstance();
+
+    redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 设置启动中
+
+    const browser = await this.launchBrowser();
+    const page = await browser.newPage();
+
+    // STEP 1: Navigate to homepage first to let Clerk JS establish session
+    // We don't have __session cookie - Clerk JS needs to create it by validating __client with auth.suno.com
+    logger.info('Step 1: Navigating to suno.com homepage to establish Clerk session...');
+    await page.goto('https://suno.com', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: SunoApi.TIMEOUTS.PAGE_NAVIGATION });
+
+    // Wait for Clerk JS to authenticate (it calls auth.suno.com/v1/client and sets __session)
+    logger.info('Waiting for Clerk JS to establish session...');
+    try {
+      await page.waitForResponse(
+        response => response.url().includes('auth.suno.com/v1/client') && response.status() === 200,
+        { timeout: 10000 }
+      );
+      logger.info('Clerk authentication response received');
+      // Give Clerk JS time to process and set cookies
+      await sleep(2);
+    } catch (e) {
+      logger.warn('Clerk auth response timeout - continuing anyway');
+    }
+
+    await this.mustGetCreatePage(page);
+
+    if (this.ghostCursorEnabled)
+      this.cursor = await createCursor(page);
+
+    logger.info('Triggering the CAPTCHA');
+
+
+    // Set up route interception BEFORE clicking the Create button
+    const controller = new AbortController();
+
+    // Log all API requests to see what's actually being called
+    page.on('request', request => {
+      if (request.url().includes('/api/')) {
+        logger.info(`API Request: ${request.method()} ${request.url()}`);
+      }
+    });
+
+    const tokenPromise = new Promise<string|null>((resolve, reject) => {
+      // Try multiple patterns to catch the generate request
+      const patterns = [
+        '**/api/generate/v2/**',
+        '**/api/generate/v3/**',
+        '**/api/generate/**',
+        '**/generate/**'
+      ];
+
+      patterns.forEach(pattern => {
+        page.route(pattern, async (route) => {
+          try {
+            logger.info(`Route intercepted! Pattern: ${pattern}, URL: ${route.request().url()}`);
+            logger.info('Extracting token from request...');
+
+            const request = route.request();
+            const headers = request.headers();
+            const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
+
+            logger.debug('Request headers', sanitize(headers));
+            logger.debug('Request post data', sanitize(postData));
+
+            // Extract token from post data if it exists
+            const token = postData?.token || postData?.hcaptcha_token;
+
+            // Extract auth token from headers
+            if (headers.authorization) {
+              this.currentToken = headers.authorization.split('Bearer ').pop();
+            }
+
+            logger.info(`Captured token: ${token ? 'Yes' : 'No'}`);
+            logger.info('Aborting request and closing browser');
+
+            route.abort();
+            // const browserInstance = browser.browser();
+            // if (browserInstance) {
+            //   browserInstance.close().catch(closeError => {
+            //     logger.error('Failed to close browser during route interception', { error: toError(closeError) });
+            //   });
+            // } else {
+            //   logger.warn('Browser instance not available for cleanup during route interception');
+            // }
+            // controller.abort();
+
+            resolve(token || null);
+          } catch(err) {
+            const error = toError(err);
+            logger.error(`Route interception error: ${error.message}`);
+            reject(error);
+          }
+        });
+      });
+    });
+
+
+      // Find and fill the textarea - try multiple selectors
+      // logger.info('Looking for song description textarea...');
+      // let textarea;
+      // try {
+      //   // Try original selector first
+      //   textarea = page.locator('textarea[placeholder*="song"]');
+      //   await textarea.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.TEXTAREA_WAIT });
+      //   logger.info('Found textarea with Hip-hop placeholder');
+      // } catch(e) {
+      //   logger.info('Hip-hop placeholder not found, trying alternative selectors...');
+      //   // Try finding any visible textarea on the page
+      //   const textareas = page.locator('textarea');
+      //   const count = await textareas.count();
+      //   logger.info(`Found ${count} textareas on page`);
+
+      //   // Usually the song description textarea is the first or second one
+      //   for (let i = 0; i < count; i++) {
+      //     const ta = textareas.nth(i);
+      //     if (await ta.isVisible()) {
+      //       textarea = ta;
+      //       logger.info(`Using textarea at index ${i}`);
+      //       break;
+      //     }
+      //   }
+
+      //   if (!textarea) {
+      //     throw new Error('Could not find any visible textarea on the page');
+      //   }
+      // }
+
+      // logger.info('Filling textarea with test prompt...');
+
+    // 设置启动完成
+    redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
+
+    while (true) {
+      // 获取是否有新任务：只有当task存在且token为空时，才进行新任务
+      const task = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TASK);
+      const token = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN);
+      if (!task || (task && token)) {
+        logger.info('No new CAPTCHA task found, waiting 5 seconds...');
+        await sleep(5);
+        continue;
+      }
+
+      logger.info('Looking for Create button...');
+      const button = page.locator('button[aria-label="Create song"]');
+      await button.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.CREATE_BUTTON_WAIT });
+      logger.info('Clicking Create button...');
+      await button.click();
+      logger.info('Create button clicked - waiting for CAPTCHA...');
+
+      // Store the CAPTCHA solving promise to ensure it's properly handled
+      const captchaSolvingPromise = new Promise<void>(async (resolve, reject) => {
+        const frame = page.frameLocator('iframe[title*="hCaptcha"]');
+        const challenge = frame.locator('.challenge-container');
+        try {
+          let shouldWaitForImages = true;
+
+          // Continuous CAPTCHA solving loop
+          while (true) {
+            // Wait for CAPTCHA images to load if needed
+            if (shouldWaitForImages) {
+              await sleep(SunoApi.TIMEOUTS.CAPTCHA_IMAGE_LOAD_DELAY);
+            }
+
+            // Determine CAPTCHA type
+            const promptText = await challenge.locator('.prompt-text').first().innerText();
+            const isDragType = promptText.toLowerCase().includes('drag');
+
+            // Solve CAPTCHA with retry logic
+            const solution = await this.solveCaptchaWithRetry(challenge, isDragType);
+            if (!solution) {
+              throw new Error('Failed to solve CAPTCHA after 3 attempts');
+            }
+
+            // Handle drag-type CAPTCHA
+            if (isDragType) {
+              // Validate solution has even number of points
+              if (!this.validateDragSolution(solution)) {
+                shouldWaitForImages = false;
+                continue; // Request new solution
+              }
+
+              // Get challenge bounding box for coordinate calculations
+              const challengeBox = await challenge.boundingBox();
+              if (!challengeBox) {
+                throw new Error('.challenge-container boundingBox is null!');
+              }
+
+              // Perform drag interaction
+              await this.performDragInteraction(page, challengeBox, solution);
+              shouldWaitForImages = true;
+            } else {
+              // Handle click-type CAPTCHA
+              await this.performClickInteraction(challenge, solution);
+            }
+
+            // Submit solution
+            await this.submitCaptchaSolution(frame, button);
+          }
+        } catch(e) {
+          const error = toError(e);
+          // Check for expected termination conditions
+          if (error.message.includes('been closed') || error.message === 'AbortError') {
+            resolve();
+          } else {
+            reject(error);
+          }
+        }
+      }).catch(e => {
+        const error = toError(e);
+        // const browserInstance = browser.browser();
+        // if (browserInstance) {
+        //   browserInstance.close().catch(closeError => {
+        //     logger.error('Failed to close browser after CAPTCHA error', { error: toError(closeError) });
+        //   });
+        // } else {
+        //   logger.warn('Browser instance not available for cleanup after CAPTCHA error');
+        // }
+        throw error;
+      });
+
+      // Wait for either tokenPromise or captchaSolvingPromise to complete
+      // This ensures proper coordination between token extraction and CAPTCHA solving
+      try {
+        await Promise.race([tokenPromise, captchaSolvingPromise]);
+        let token = await tokenPromise
+        if (token) {
+          console.log('获取到验证码token:', token);
+          // 回到create页面，准备下一个任务
+          token = token || '-1';
+          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, token);
+          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
+          await this.mustGetCreatePage(page);
+          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
+        }
+      } catch (e) {
+        console.log('获取验证码token失败:', toError(e).message);
+        redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
+        await this.mustGetCreatePage(page);
+        redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
+      }
+    }
+  }
 
   /**
    * Generate music from a text description using AI.
