@@ -1772,22 +1772,45 @@ class SunoApi {
     }
 
     const taskId = await this.genTaskId();
+
     await this.keepAlive();
 
-    const reqToken = await this.getTokenByTaskId(taskId);
+    // [v5 Security] create session token, transaction ID
+    const sessionToken = await this.getSessionToken();
+    const transactionId = randomUUID();
 
-    const payload: Partial<GenerateSongsPayload> = {
+    const reqToken = await this.getTokenByTaskId(taskId);
+    const payload: any = {
+      token: await this.getCaptcha(),
+      generation_type: 'TEXT',
+      title: title || '',
+      tags: tags || '',
+      negative_tags: negative_tags || '',
+      mv:  model || DEFAULT_MODEL,
+      prompt: prompt,
       make_instrumental: make_instrumental,
-      mv: model || DEFAULT_MODEL,
-      prompt: '',
-      generation_type: task === 'extend' ? 'EXTEND' : 'TEXT',
-      continue_at: continue_at,
-      continue_clip_id: continue_clip_id,
-      cover_clip_id: cover_clip_id,
-      vocal_gender: vocal_gender,
-      task: task,
-      token: reqToken
+      user_uploaded_images_b64: null,
+      metadata: {
+        web_client_pathname: '/create',
+        is_max_mode: false,
+        is_mumble: false,
+        create_mode: isCustom ? 'custom' : 'normal',
+        create_session_token: sessionToken, // required
+        disable_volume_normalization: false,
+        can_control_sliders: ["weirdness_constraint", "style_weight"]
+        // exclude user_tier cause it could be optional (if error, need to fix it)
+      },
+      override_fields: [],
+      transaction_uuid: transactionId
     };
+    if (task === 'extend') {
+      payload.continue_clip_id = continue_clip_id;
+      payload.continue_at = continue_at;
+      payload.task = task;
+    } else if (task === 'cover') {
+      payload.cover_clip_id = cover_clip_id;
+      payload.task = task;
+    }
     if (isCustom) {
       payload.tags = tags;
       payload.title = title;
@@ -1796,18 +1819,9 @@ class SunoApi {
     } else {
       payload.gpt_description_prompt = prompt;
     }
-    logger.info('generateSongs payload', sanitize({
-      prompt: prompt,
-      isCustom: isCustom,
-      tags: tags,
-      title: title,
-      make_instrumental: make_instrumental,
-      wait_audio: wait_audio,
-      negative_tags: negative_tags,
-      payload: payload
-    }));
+    logger.info('generateSongs payload', sanitize(payload));
     const response = await this.client.post<ClipsResponse>(
-      `${SunoApi.BASE_URL}/api/generate/v2/`,
+      `${SunoApi.BASE_URL}/api/generate/v2-web/`,
       payload,
       {
         timeout: SunoApi.TIMEOUTS.API_GENERATE
