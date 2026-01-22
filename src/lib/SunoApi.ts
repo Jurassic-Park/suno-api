@@ -1726,7 +1726,7 @@ class SunoApi {
 
     let attempts = 0;
     while (true) {
-      if (attempts >= 50) {
+      if (attempts >= 100) {
         throw new Error('Failed to get CAPTCHA token after multiple attempts');
       }
 
