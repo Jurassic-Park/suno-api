@@ -1408,16 +1408,12 @@ class SunoApi {
             //   logger.warn('Browser instance not available for cleanup during route interception');
             // }
             // controller.abort();
-            if (token) {
-              const payload: GenerateSongsV2Payload = {
-                auth_token: this.currentToken || '',
-                hcaptcha_token: token,
-                data: postDataString || ''
-              };
-              resolve(payload);
-            } else {
-              resolve(null);
-            }
+            const payload: GenerateSongsV2Payload = {
+              auth_token: this.currentToken || '',
+              hcaptcha_token: token? token : '-1',
+              data: postDataString || ''
+            };
+            resolve(payload);
           } catch(err) {
             const error = toError(err);
             logger.error(`Route interception error: ${error.message}`);
@@ -1507,7 +1503,6 @@ class SunoApi {
         if (req) {
           console.log('获取到验证码token:', req.hcaptcha_token);
           // 回到create页面，准备下一个任务
-          req.hcaptcha_token = req.hcaptcha_token === '-1' ? '' : req.hcaptcha_token;
           redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 10, req.hcaptcha_token); // 设置token，10秒过期
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_AUTH_TOKEN, req.auth_token); // 清空任务
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_REQUEST_DATA, req.data); // 清空任务
@@ -1876,7 +1871,8 @@ class SunoApi {
       payload.prompt = "";
       payload.gpt_description_prompt = prompt;
     }
-    logger.info('generateSongs payload', sanitize(payload));
+    // payload转json
+    logger.info(`generateSongs payload ${JSON.stringify(payload, null, 2)}`);
     const response = await this.client.post<ClipsResponse>(
       `${SunoApi.BASE_URL}/api/generate/v2-web/`,
       payload,
