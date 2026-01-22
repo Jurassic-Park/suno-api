@@ -1358,70 +1358,70 @@ class SunoApi {
       await button.click();
       logger.info('Create button clicked - waiting for CAPTCHA...');
 
-    const tokenPromise = new Promise<GenerateSongsV2Payload|null>((resolve, reject) => {
-      // Try multiple patterns to catch the generate request
-      const patterns = [
-        '**/api/generate/v2/**',
-        '**/api/generate/v3/**',
-        '**/api/generate/**',
-        '**/generate/**'
-      ];
+      const tokenPromise = new Promise<GenerateSongsV2Payload|null>((resolve, reject) => {
+        // Try multiple patterns to catch the generate request
+        const patterns = [
+          '**/api/generate/v2/**',
+          '**/api/generate/v3/**',
+          '**/api/generate/**',
+          '**/generate/**'
+        ];
 
-      patterns.forEach(pattern => {
-        page.route(pattern, async (route) => {
-          try {
-            logger.info(`Route intercepted! Pattern: ${pattern}, URL: ${route.request().url()}`);
-            logger.info('Extracting token from request...');
+        patterns.forEach(pattern => {
+          page.route(pattern, async (route) => {
+            try {
+              logger.info(`Route intercepted! Pattern: ${pattern}, URL: ${route.request().url()}`);
+              logger.info('Extracting token from request...');
 
-            const request = route.request();
-            const headers = request.headers();
-            const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
+              const request = route.request();
+              const headers = request.headers();
+              const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
 
-            // 变string返回
-            const postDataString = request.postData();
+              // 变string返回
+              const postDataString = request.postData();
 
-            // logger.info('Request headers', sanitize(headers));
-            logger.info(`Request post data ${postDataString}`);
+              // logger.info('Request headers', sanitize(headers));
+              logger.info(`Request post data ${postDataString}`);
 
-            // 获取headers中的authorization
-            // 获取postData中的所有值
-            logger.info(`Authorization header ${headers.authorization}`);
+              // 获取headers中的authorization
+              // 获取postData中的所有值
+              logger.info(`Authorization header ${headers.authorization}`);
 
-            // Extract token from post data if it exists
-            const token = postData?.token || postData?.hcaptcha_token;
+              // Extract token from post data if it exists
+              const token = postData?.token || postData?.hcaptcha_token;
 
-            // Extract auth token from headers
-            if (headers.authorization) {
-              this.currentToken = headers.authorization.split('Bearer ').pop();
+              // Extract auth token from headers
+              if (headers.authorization) {
+                this.currentToken = headers.authorization.split('Bearer ').pop();
+              }
+
+              logger.info(`Captured token: ${token ? 'Yes' : 'No'}`);
+              logger.info('Aborting request and closing browser');
+
+              route.abort();
+              // const browserInstance = browser.browser();
+              // if (browserInstance) {
+              //   browserInstance.close().catch(closeError => {
+              //     logger.error('Failed to close browser during route interception', { error: toError(closeError) });
+              //   });
+              // } else {
+              //   logger.warn('Browser instance not available for cleanup during route interception');
+              // }
+              // controller.abort();
+              const payload: GenerateSongsV2Payload = {
+                auth_token: this.currentToken || '',
+                hcaptcha_token: token? token : '-1',
+                data: postDataString || ''
+              };
+              resolve(payload);
+            } catch(err) {
+              const error = toError(err);
+              logger.error(`Route interception error: ${error.message}`);
+              reject(error);
             }
-
-            logger.info(`Captured token: ${token ? 'Yes' : 'No'}`);
-            logger.info('Aborting request and closing browser');
-
-            route.abort();
-            // const browserInstance = browser.browser();
-            // if (browserInstance) {
-            //   browserInstance.close().catch(closeError => {
-            //     logger.error('Failed to close browser during route interception', { error: toError(closeError) });
-            //   });
-            // } else {
-            //   logger.warn('Browser instance not available for cleanup during route interception');
-            // }
-            // controller.abort();
-            const payload: GenerateSongsV2Payload = {
-              auth_token: this.currentToken || '',
-              hcaptcha_token: token? token : '-1',
-              data: postDataString || ''
-            };
-            resolve(payload);
-          } catch(err) {
-            const error = toError(err);
-            logger.error(`Route interception error: ${error.message}`);
-            reject(error);
-          }
+          });
         });
       });
-    });
 
 
       // Store the CAPTCHA solving promise to ensure it's properly handled
@@ -1501,6 +1501,7 @@ class SunoApi {
         await Promise.race([tokenPromise, captchaSolvingPromise]);
         let req = await tokenPromise
         if (req) {
+          // 清除page里已有的route
           console.log('获取到验证码token:', req.hcaptcha_token);
           // 回到create页面，准备下一个任务
           redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 10, req.hcaptcha_token); // 设置token，10秒过期
