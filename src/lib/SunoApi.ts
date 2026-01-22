@@ -1713,7 +1713,7 @@ class SunoApi {
       await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TOKEN, 30, ''); // 清空token
       // 当时时间戳+随机数作为任务ID
       const taskId = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TASK, 30, taskId);
+      await redisInstance.setex(SunoApi.REDISKEY.CAPTCHA_LAST_TASK, 300, taskId);
       return taskId;
     }
   }
