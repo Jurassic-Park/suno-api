@@ -27,8 +27,9 @@ export async function GET(req: NextRequest) {
       // console.log(await redisInstance.get('captcha_v2_token'));
       // return;
 
-      (await sunoApiNoInit()).getCaptchaV2();
-      // (await sunoApi()).getCaptchaV2();
+      // (await sunoApiNoInit()).getCaptchaV2();
+      (await sunoApi()).getCaptchaV2();
+      // await fetch('http://127.0.0.1:3001/api/captcha');
 
       return new NextResponse('{}', {
         status: 200,

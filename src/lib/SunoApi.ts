@@ -1817,7 +1817,7 @@ class SunoApi {
     await this.keepAlive();
 
     // [v5 Security] create session token, transaction ID
-    const sessionToken = await this.getSessionToken();
+    // const sessionToken = await this.getSessionToken();
 
     const req = await this.getTokenByTaskId(taskId);
 
@@ -1867,10 +1867,11 @@ class SunoApi {
       payload.negative_tags = negative_tags;
       payload.prompt = prompt;
       payload.metadata.create_mode = 'custom';
+      payload.gpt_description_prompt = '';
     } else {
       payload.metadata.create_mode = 'simple';
-      payload.prompt = "";
       payload.gpt_description_prompt = prompt;
+      payload.prompt = "";
     }
     // payload转json
     logger.info(`generateSongs payload ${JSON.stringify(payload, null, 2)}`);
@@ -2431,8 +2432,10 @@ export const sunoApi = async (cookie?: string) => {
 
   // Check if the instance for this cookie already exists in the cache
   const cachedInstance = cache.get(resolvedCookie);
-  if (cachedInstance)
+  if (cachedInstance) {
+    logger.info('Using cached SunoApi instance');
     return cachedInstance;
+  }
 
   // If not, create a new instance and initialize it
   const instance = await new SunoApi(resolvedCookie).init();
