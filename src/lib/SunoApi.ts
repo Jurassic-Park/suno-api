@@ -1431,8 +1431,15 @@ class SunoApi {
         try {
           let shouldWaitForImages = true;
 
+          let attempts = 0;
+
           // Continuous CAPTCHA solving loop
           while (true) {
+            attempts++;
+            logger.info(`CAPTCHA solving attempt ${attempts}`);
+            if (attempts > 2) {
+              throw new Error('Exceeded maximum CAPTCHA solving attempts');
+            }
             // Wait for CAPTCHA images to load if needed
             if (shouldWaitForImages) {
               await sleep(SunoApi.TIMEOUTS.CAPTCHA_IMAGE_LOAD_DELAY);
