@@ -1,0 +1,18 @@
+{
+ "apps": [
+   {
+     "name": "suno-captcha",
+     "script": "pm2-captcha.sh",
+     "instances": 1,
+     "max_memory_restart": "500M",
+     "cwd": "/www/wwwroot/suno-api",
+     "log_date_format": "YYYY-MM-DD HH:mm Z",
+     "error_file": "./logs/suno-captcha-error.log",
+     "out_file": "./logs/suno-captcha-out.log",
+     "env": {
+     },
+     "env_production": {
+     }
+   }
+ ]
+}
