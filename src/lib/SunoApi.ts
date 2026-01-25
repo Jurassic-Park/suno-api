@@ -485,7 +485,7 @@ class SunoApi {
   private cursor?: Cursor;
 
   // 积分
-  private left_credit?: number;
+  private left_credit: number = 0;
 
   constructor(cookies: string) {
     // Validate required environment variables at startup
@@ -1397,13 +1397,13 @@ class SunoApi {
         logger.error(`No task data found for task ID: ${task}`);
         continue;
       }
-      if (this.left_credit && this.left_credit <= 0) {
+      if (this.left_credit <= 0) {
         this.setTaskResponse(task, {
           code: 402,
-          message: 'Insufficient credits',
+          message: `left credits not enough: ${this.left_credit}`,
           datas: []
         });
-        logger.error(`left credits is empty`);
+        logger.error(`left credits is empty: ${this.left_credit}`);
         continue;
       }
 
