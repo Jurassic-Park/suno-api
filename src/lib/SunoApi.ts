@@ -1407,161 +1407,161 @@ class SunoApi {
         continue;
       }
 
-      logger.info('Looking for Create button...');
-      const button = page.locator('button[aria-label="Create song"]');
-      await button.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.CREATE_BUTTON_WAIT });
-      logger.info('Clicking Create button...');
-      await button.click();
-      logger.info('Create button clicked - waiting for CAPTCHA...');
+      try {
+        logger.info('Looking for Create button...');
+        const button = page.locator('button[aria-label="Create song"]');
+        await button.waitFor({ state: 'visible', timeout: SunoApi.TIMEOUTS.CREATE_BUTTON_WAIT });
+        logger.info('Clicking Create button...');
+        await button.click();
+        logger.info('Create button clicked - waiting for CAPTCHA...');
 
-      const tokenPromise = new Promise<GenerateCaptchaV2Response|null>((resolve, reject) => {
-        // Try multiple patterns to catch the generate request
-        const patterns = [
-          '**/api/generate/v2/**',
-          '**/api/generate/v3/**',
-          '**/api/generate/v2-web/',
-          // '**/api/generate/**',
-          // '**/generate/**'
-        ];
+        const tokenPromise = new Promise<GenerateCaptchaV2Response|null>((resolve, reject) => {
+          // Try multiple patterns to catch the generate request
+          const patterns = [
+            '**/api/generate/v2/**',
+            '**/api/generate/v3/**',
+            '**/api/generate/v2-web/',
+            // '**/api/generate/**',
+            // '**/generate/**'
+          ];
 
-        patterns.forEach(pattern => {
-          page.route(pattern, async (route) => {
-            try {
-              logger.info(`Route intercepted! Pattern: ${pattern}, URL: ${route.request().url()}`);
-              logger.info('Extracting token from request...');
+          patterns.forEach(pattern => {
+            page.route(pattern, async (route) => {
+              try {
+                logger.info(`Route intercepted! Pattern: ${pattern}, URL: ${route.request().url()}`);
+                logger.info('Extracting token from request...');
 
-              const request = route.request();
-              const headers = request.headers();
-              const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
+                const request = route.request();
+                const headers = request.headers();
+                const postData = request.postDataJSON() as { token?: string; hcaptcha_token?: string } | null;
 
-              // 变string返回
-              const postDataString = request.postData();
+                // 变string返回
+                const postDataString = request.postData();
 
-              // logger.info('Request headers', sanitize(headers));
-              logger.info(`Request post data ${postDataString}`);
+                // logger.info('Request headers', sanitize(headers));
+                logger.info(`Request post data ${postDataString}`);
 
-              // 获取headers中的authorization
-              // 获取postData中的所有值
-              logger.info(`Authorization header ${headers.authorization}`);
+                // 获取headers中的authorization
+                // 获取postData中的所有值
+                logger.info(`Authorization header ${headers.authorization}`);
 
-              // Extract token from post data if it exists
-              const token = postData?.token || postData?.hcaptcha_token;
+                // Extract token from post data if it exists
+                const token = postData?.token || postData?.hcaptcha_token;
 
-              // Extract auth token from headers
-              if (headers.authorization) {
-                this.currentToken = headers.authorization.split('Bearer ').pop();
+                // Extract auth token from headers
+                if (headers.authorization) {
+                  this.currentToken = headers.authorization.split('Bearer ').pop();
+                }
+
+                logger.info(`Captured token: ${token ? 'Yes' : 'No'}`);
+                logger.info('Aborting request and closing browser');
+
+                route.abort();
+                // const browserInstance = browser.browser();
+                // if (browserInstance) {
+                //   browserInstance.close().catch(closeError => {
+                //     logger.error('Failed to close browser during route interception', { error: toError(closeError) });
+                //   });
+                // } else {
+                //   logger.warn('Browser instance not available for cleanup during route interception');
+                // }
+                // controller.abort();
+                const payload: GenerateCaptchaV2Response = {
+                  auth_token: this.currentToken || '',
+                  hcaptcha_token: token? token : '-1',
+                  data: postDataString || ''
+                };
+                resolve(payload);
+              } catch(err) {
+                const error = toError(err);
+                logger.error(`Route interception error: ${error.message}`);
+                reject(error);
               }
-
-              logger.info(`Captured token: ${token ? 'Yes' : 'No'}`);
-              logger.info('Aborting request and closing browser');
-
-              route.abort();
-              // const browserInstance = browser.browser();
-              // if (browserInstance) {
-              //   browserInstance.close().catch(closeError => {
-              //     logger.error('Failed to close browser during route interception', { error: toError(closeError) });
-              //   });
-              // } else {
-              //   logger.warn('Browser instance not available for cleanup during route interception');
-              // }
-              // controller.abort();
-              const payload: GenerateCaptchaV2Response = {
-                auth_token: this.currentToken || '',
-                hcaptcha_token: token? token : '-1',
-                data: postDataString || ''
-              };
-              resolve(payload);
-            } catch(err) {
-              const error = toError(err);
-              logger.error(`Route interception error: ${error.message}`);
-              reject(error);
-            }
+            });
           });
         });
-      });
 
 
-      // Store the CAPTCHA solving promise to ensure it's properly handled
-      const captchaSolvingPromise = new Promise<void>(async (resolve, reject) => {
-        const frame = page.frameLocator('iframe[title*="hCaptcha"]');
-        const challenge = frame.locator('.challenge-container');
-        try {
-          let shouldWaitForImages = true;
+        // Store the CAPTCHA solving promise to ensure it's properly handled
+        const captchaSolvingPromise = new Promise<void>(async (resolve, reject) => {
+          const frame = page.frameLocator('iframe[title*="hCaptcha"]');
+          const challenge = frame.locator('.challenge-container');
+          try {
+            let shouldWaitForImages = true;
 
-          let attempts = 0;
+            let attempts = 0;
 
-          // Continuous CAPTCHA solving loop
-          while (true) {
-            attempts++;
-            logger.info(`CAPTCHA solving attempt ${attempts}`);
-            if (attempts > 2) {
-              throw new Error('Exceeded maximum CAPTCHA solving attempts');
-            }
-            // Wait for CAPTCHA images to load if needed
-            if (shouldWaitForImages) {
-              await sleep(SunoApi.TIMEOUTS.CAPTCHA_IMAGE_LOAD_DELAY);
-            }
-
-            // Determine CAPTCHA type
-            const promptText = await challenge.locator('.prompt-text').first().innerText();
-            const isDragType = promptText.toLowerCase().includes('drag');
-
-            // Solve CAPTCHA with retry logic
-            const solution = await this.solveCaptchaWithRetry(challenge, isDragType);
-            if (!solution) {
-              throw new Error('Failed to solve CAPTCHA after 3 attempts');
-            }
-
-            // Handle drag-type CAPTCHA
-            if (isDragType) {
-              // Validate solution has even number of points
-              if (!this.validateDragSolution(solution)) {
-                shouldWaitForImages = false;
-                continue; // Request new solution
+            // Continuous CAPTCHA solving loop
+            while (true) {
+              attempts++;
+              logger.info(`CAPTCHA solving attempt ${attempts}`);
+              if (attempts > 2) {
+                throw new Error('Exceeded maximum CAPTCHA solving attempts');
+              }
+              // Wait for CAPTCHA images to load if needed
+              if (shouldWaitForImages) {
+                await sleep(SunoApi.TIMEOUTS.CAPTCHA_IMAGE_LOAD_DELAY);
               }
 
-              // Get challenge bounding box for coordinate calculations
-              const challengeBox = await challenge.boundingBox();
-              if (!challengeBox) {
-                throw new Error('.challenge-container boundingBox is null!');
+              // Determine CAPTCHA type
+              const promptText = await challenge.locator('.prompt-text').first().innerText();
+              const isDragType = promptText.toLowerCase().includes('drag');
+
+              // Solve CAPTCHA with retry logic
+              const solution = await this.solveCaptchaWithRetry(challenge, isDragType);
+              if (!solution) {
+                throw new Error('Failed to solve CAPTCHA after 3 attempts');
               }
 
-              // Perform drag interaction
-              await this.performDragInteraction(page, challengeBox, solution);
-              shouldWaitForImages = true;
+              // Handle drag-type CAPTCHA
+              if (isDragType) {
+                // Validate solution has even number of points
+                if (!this.validateDragSolution(solution)) {
+                  shouldWaitForImages = false;
+                  continue; // Request new solution
+                }
+
+                // Get challenge bounding box for coordinate calculations
+                const challengeBox = await challenge.boundingBox();
+                if (!challengeBox) {
+                  throw new Error('.challenge-container boundingBox is null!');
+                }
+
+                // Perform drag interaction
+                await this.performDragInteraction(page, challengeBox, solution);
+                shouldWaitForImages = true;
+              } else {
+                // Handle click-type CAPTCHA
+                await this.performClickInteraction(challenge, solution);
+              }
+
+              // Submit solution
+              await this.submitCaptchaSolution(frame, button);
+            }
+          } catch(e) {
+            const error = toError(e);
+            // Check for expected termination conditions
+            if (error.message.includes('been closed') || error.message === 'AbortError') {
+              resolve();
             } else {
-              // Handle click-type CAPTCHA
-              await this.performClickInteraction(challenge, solution);
+              reject(error);
             }
-
-            // Submit solution
-            await this.submitCaptchaSolution(frame, button);
           }
-        } catch(e) {
+        }).catch(e => {
           const error = toError(e);
-          // Check for expected termination conditions
-          if (error.message.includes('been closed') || error.message === 'AbortError') {
-            resolve();
-          } else {
-            reject(error);
-          }
-        }
-      }).catch(e => {
-        const error = toError(e);
-        // const browserInstance = browser.browser();
-        // if (browserInstance) {
-        //   browserInstance.close().catch(closeError => {
-        //     logger.error('Failed to close browser after CAPTCHA error', { error: toError(closeError) });
-        //   });
-        // } else {
-        //   logger.warn('Browser instance not available for cleanup after CAPTCHA error');
-        // }
-        throw error;
-      });
+          // const browserInstance = browser.browser();
+          // if (browserInstance) {
+          //   browserInstance.close().catch(closeError => {
+          //     logger.error('Failed to close browser after CAPTCHA error', { error: toError(closeError) });
+          //   });
+          // } else {
+          //   logger.warn('Browser instance not available for cleanup after CAPTCHA error');
+          // }
+          throw error;
+        });
 
-      // Wait for either tokenPromise or captchaSolvingPromise to complete
-      // This ensures proper coordination between token extraction and CAPTCHA solving
-      try {
+        // Wait for either tokenPromise or captchaSolvingPromise to complete
+        // This ensures proper coordination between token extraction and CAPTCHA solving
         await Promise.race([tokenPromise, captchaSolvingPromise]);
         let req = await tokenPromise
         if (req) {
@@ -1610,7 +1610,6 @@ class SunoApi {
           message: 'Failed to obtain CAPTCHA token',
           datas:[]
         });
-        console.log('获取验证码token失败:', toError(e).message);
         redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
         await this.mustGetCreatePage(page);
         redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '2');
