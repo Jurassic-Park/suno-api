@@ -484,6 +484,9 @@ class SunoApi {
   private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
   private cursor?: Cursor;
 
+  // 积分
+  private left_credit?: number;
+
   constructor(cookies: string) {
     // Validate required environment variables at startup
     validateEnvironment();
@@ -1324,6 +1327,8 @@ class SunoApi {
   // 预先打开模拟器，然后直接访问 create 页面获取验证码
   // 单独任务
   public async getCaptchaV2(): Promise<void> {
+    this.getCredits()
+
     const redisInstance = getRedisInstance();
 
     redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 设置启动中
@@ -1377,7 +1382,7 @@ class SunoApi {
       const task = await redisInstance.rpop(SunoApi.REDISKEY.CAPTCHA_TASK_LIST);
       if (!task) {
         logger.info('No CAPTCHA tasks in the queue, waiting 5 seconds...');
-        await sleep(5);
+        await sleep(4);
         continue;
       }
       // 获取task内容
@@ -1390,6 +1395,15 @@ class SunoApi {
         };
         this.setTaskResponse(task, resp);
         logger.error(`No task data found for task ID: ${task}`);
+        continue;
+      }
+      if (this.left_credit && this.left_credit <= 0) {
+        this.setTaskResponse(task, {
+          code: 402,
+          message: 'Insufficient credits',
+          datas: []
+        });
+        logger.error(`left credits is empty`);
         continue;
       }
 
@@ -1574,6 +1588,7 @@ class SunoApi {
             }
             // 把结果放到redis 暂存中
             redisInstance.set(SunoApi.REDISKEY.CAPTCHA_TASK_CLIP_ID_PREFIX + task, JSON.stringify(clip_ids));
+            this.getCredits();
           } catch (e) {
             logger.error('Failed to generate songs after CAPTCHA: ' + toError(e).message);
           }
@@ -2234,6 +2249,7 @@ class SunoApi {
     const response = await this.client.get(
       `${SunoApi.BASE_URL}/api/billing/info/`
     );
+    this.left_credit = response.data.total_credits_left;
     return {
       credits_left: response.data.total_credits_left,
       period: response.data.period,
