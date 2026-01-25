@@ -467,11 +467,11 @@ class SunoApi {
     // 任务列表
     CAPTCHA_TASK_LIST: 'h5activity_cache:suno_api_captcha_task_list',
     // task 所对应的请求数据
-    CAPTCHA_TASK_REQ_DATA: 'h5activity_cache:suno_api_captcha_task_req_data:%s',
+    CAPTCHA_TASK_REQ_DATA: 'h5activity_cache:suno_api_captcha_task_req_data:',
     // task 提交成功后暂存的clip id 
     CAPTCHA_TASK_CLIP_ID_PREFIX: 'h5activity_cache:suno_api_captcha_task_clip_id:',
     // task 执行结果
-    CAPTCHA_TASK_RESPONSE: 'h5activity_cache:suno_api_captcha_task_response:%s',
+    CAPTCHA_TASK_RESPONSE: 'h5activity_cache:suno_api_captcha_task_response:',
   } as const;
 
   private readonly client: AxiosInstance;
@@ -1303,7 +1303,7 @@ class SunoApi {
   // 设置task结果
   private async setTaskResponse(taskId: string, payload: GenerateSongsV2Response): Promise<void> {
     const redisInstance = getRedisInstance();
-    const taskKey = SunoApi.REDISKEY.CAPTCHA_TASK_RESPONSE.replace('%s', taskId);
+    const taskKey = SunoApi.REDISKEY.CAPTCHA_TASK_RESPONSE + taskId;
     await redisInstance.setex(taskKey, 1800, JSON.stringify(payload));
     // 回调通知
     if (process.env.TASK_CALLBACK_URL) {
@@ -1381,7 +1381,7 @@ class SunoApi {
         continue;
       }
       // 获取task内容
-      const taskReqData = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_TASK_REQ_DATA.replace('%s', task));
+      const taskReqData = await redisInstance.get(SunoApi.REDISKEY.CAPTCHA_TASK_REQ_DATA + task);
       if (!taskReqData) {
         let resp: GenerateSongsV2Response= {
           code: 400,
@@ -1405,8 +1405,9 @@ class SunoApi {
         const patterns = [
           '**/api/generate/v2/**',
           '**/api/generate/v3/**',
-          '**/api/generate/**',
-          '**/generate/**'
+          '**/api/generate/v2-web/',
+          // '**/api/generate/**',
+          // '**/generate/**'
         ];
 
         patterns.forEach(pattern => {
@@ -1565,13 +1566,17 @@ class SunoApi {
           taskReqObj.transaction_uuid = reqDataObj.transaction_uuid;
           
           // 请求到suno
-          const taskResult = await this.generateSongsV2(taskReqObj);
-          let clip_ids : string[] = [];
-          for (const audio of taskResult) {
-            clip_ids.push(audio.id);
+          try {
+            const taskResult = await this.generateSongsV2(taskReqObj);
+            let clip_ids : string[] = [];
+            for (const audio of taskResult) {
+              clip_ids.push(audio.id);
+            }
+            // 把结果放到redis 暂存中
+            redisInstance.set(SunoApi.REDISKEY.CAPTCHA_TASK_CLIP_ID_PREFIX + task, JSON.stringify(clip_ids));
+          } catch (e) {
+            logger.error('Failed to generate songs after CAPTCHA: ' + toError(e).message);
           }
-          // 把结果放到redis 暂存中
-          redisInstance.set(SunoApi.REDISKEY.CAPTCHA_TASK_CLIP_ID_PREFIX + task, JSON.stringify(clip_ids));
 
           // 回到create页面，准备下一个任务
           redisInstance.set(SunoApi.REDISKEY.CAPTCHA_STATUS, '1'); // 启动中
@@ -1615,27 +1620,26 @@ class SunoApi {
             continue;
           }
           const clipIds: string[] = JSON.parse(clipIdsData);
+          const audioList = await this.get(clipIds);
           const audios: AudioInfo[] = [];
-          for (const clipId of clipIds) {
-            try {
-              const audioInfo = await this.get([clipId]);
-              if (audioInfo[0].status !== 'completed') {
-                logger.info(`Clip ID: ${clipId} is not completed yet, will retry later.`);
-                continue;
-              }
-              audios.push(audioInfo[0]);
-            } catch (e) {
-              logger.error(`Failed to concatenate clip ID: ${clipId}`, { error: toError(e) });
+          for (const audioInfo of audioList) {
+            logger.info(`Clip ID: ${audioInfo.id}, Status: ${audioInfo.status}`);
+            if (audioInfo.status !== 'complete') {
+              logger.info(`Clip ID: ${audioInfo.id} is not completed yet, will retry later.`);
+              continue;
             }
+            audios.push(audioInfo);
           }
-          const resp: GenerateSongsV2Response= {
-            code: 200,
-            message: 'Success',
-            datas: audios
-          };
-          await this.setTaskResponse(taskId, resp);
-          // 删除已处理的clip id key
-          // await redisInstance.del(taskKey);
+          if (audios.length > 0) {
+            const resp: GenerateSongsV2Response= {
+              code: 200,
+              message: 'Success',
+              datas: audios
+            };
+            await this.setTaskResponse(taskId, resp);
+            // 删除已处理的clip id key
+            redisInstance.del(taskKey);
+          }
         }
       } catch (e) {
         logger.error('Error handling clip ID tasks', { error: toError(e) });
