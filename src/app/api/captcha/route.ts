@@ -28,7 +28,9 @@ export async function GET(req: NextRequest) {
       // return;
 
       // (await sunoApiNoInit()).getCaptchaV2();
-      (await sunoApi()).getCaptchaV2();
+      const sunoApiObj = await sunoApi()
+      sunoApiObj.getCaptchaV2();
+      sunoApiObj.handleClipIdTasks();
       // await fetch('http://127.0.0.1:3001/api/captcha');
 
       return new NextResponse('{}', {
