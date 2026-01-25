@@ -1624,11 +1624,9 @@ class SunoApi {
           const audios: AudioInfo[] = [];
           for (const audioInfo of audioList) {
             logger.info(`Clip ID: ${audioInfo.id}, Status: ${audioInfo.status}`);
-            if (audioInfo.status !== 'complete') {
-              logger.info(`Clip ID: ${audioInfo.id} is not completed yet, will retry later.`);
-              continue;
+            if (audioInfo.status == 'complete' || audioInfo.status == 'streaming') {
+              audios.push(audioInfo);
             }
-            audios.push(audioInfo);
           }
           if (audios.length > 0) {
             const resp: GenerateSongsV2Response= {
@@ -1637,8 +1635,11 @@ class SunoApi {
               datas: audios
             };
             await this.setTaskResponse(taskId, resp);
-            // 删除已处理的clip id key
-            redisInstance.del(taskKey);
+            // 如果两个音频都完成， 直接删除key
+            if (audios[0].status == 'complete' && audios[1] && audios[1].status == 'complete') {
+              // 删除已处理的clip id key
+              redisInstance.del(taskKey);
+            }
           }
         }
       } catch (e) {
