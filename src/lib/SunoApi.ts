@@ -2249,7 +2249,7 @@ class SunoApi {
       `${SunoApi.BASE_URL}/api/billing/info/`
     );
     this.left_credit = response.data.total_credits_left;
-    logger.info(`getCredits response: ${JSON.stringify(response.data)}`);
+    // logger.info(`getCredits response: ${JSON.stringify(response.data)}`);
     return {
       credits_left: response.data.total_credits_left,
       period: response.data.period,
