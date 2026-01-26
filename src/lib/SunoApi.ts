@@ -1398,13 +1398,17 @@ class SunoApi {
         continue;
       }
       if (this.left_credit <= 0) {
-        this.setTaskResponse(task, {
-          code: 402,
-          message: `left credits not enough: ${this.left_credit}`,
-          datas: []
-        });
-        logger.error(`left credits is empty: ${this.left_credit}`);
-        continue;
+        // 再检查一下
+        await this.getCredits();
+        if (this.left_credit <= 0) {
+          this.setTaskResponse(task, {
+            code: 402,
+            message: `left credits not enough: ${this.left_credit}`,
+            datas: []
+          });
+          logger.error(`left credits is empty: ${this.left_credit}`);
+          continue;
+        }
       }
 
       try {
