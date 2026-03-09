@@ -14,6 +14,9 @@ async function lyriaRealtime(textPrompt: string) {
   //   sampleRate: 44100, // 44.1 kHz
   // });
 
+  // 结束标志
+  let isFinished = false;
+
   const session = await client.live.music.connect({
     model: "models/lyria-realtime-exp",
     callbacks: {
@@ -33,7 +36,10 @@ async function lyriaRealtime(textPrompt: string) {
         }
       },
       onerror: (error) => console.error("music session error:", error),
-      onclose: () => console.log("Lyria RealTime stream closed."),
+      onclose: () => {
+        console.log("Music session closed");
+        isFinished = true;
+      },
     },
   });
 
@@ -52,7 +58,19 @@ async function lyriaRealtime(textPrompt: string) {
     },
   });
 
-  await session.play();
+  session.play();
+
+  // 等待生成完成或设置超时
+    await new Promise((resolve) => {
+        const checkInterval = setInterval(() => {
+            if (isFinished) {
+                clearInterval(checkInterval);
+                resolve(null);
+            }
+        }, 1000); // 每秒检查一次
+    });
+
+  console.log("Music generation session ended");
 }
 
 export { lyriaRealtime };
