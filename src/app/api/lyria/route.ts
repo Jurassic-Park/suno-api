@@ -10,20 +10,9 @@ export async function POST(req: NextRequest) {
       const body = await req.json();
       const { prompt } = body;
 
-      lyriaRealtime(prompt).catch(console.error);
+      await lyriaRealtime(prompt).catch(console.error);
 
       console.log("Music generation started with prompt:", prompt);
-      try {
-        // Wait for the session to complete or set a timeout
-        await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error("Music generation timed out"));
-          }, 60000); // 60 seconds timeout
-        });
-      } catch (error) {
-        console.error('Error during music generation:', error);
-      }
-
 
       return new NextResponse(JSON.stringify({ message: "Audio generated successfully" }), {
         status: 200,
@@ -45,7 +34,7 @@ export async function POST(req: NextRequest) {
 }
 
 export async function GET(req: Request) {
-    fs.writeFileSync("/tmp/output.raw", "999999999999"); // Save raw audio for debugging
+    // fs.writeFileSync("/tmp/output.raw", "999999999999"); // Save raw audio for debugging
     // 反回文件流
     const url = new URL(req.url);
     const filename = url.searchParams.get('filename');

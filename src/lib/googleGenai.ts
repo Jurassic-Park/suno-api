@@ -26,7 +26,7 @@ async function lyriaRealtime(textPrompt: string) {
             if (chunk.data) {
               console.log("Chunk data length (base64):", chunk.data.length);
               const audioBuffer = Buffer.from(chunk.data, "base64");
-              fs.writeFileSync("output.raw", audioBuffer); // Save raw audio for debugging
+              fs.writeFileSync("/tmp/output.raw", audioBuffer); // Save raw audio for debugging
             }
             // speaker.write(audioBuffer);
           }
