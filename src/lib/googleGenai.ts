@@ -18,6 +18,7 @@ async function lyriaRealtime(textPrompt: string) {
     model: "models/lyria-realtime-exp",
     callbacks: {
       onmessage: (message) => {
+        console.log("Received message:", message);
         if (message.serverContent?.audioChunks) {
           for (const chunk of message.serverContent.audioChunks) {
             const mt = chunk.mimeType; 

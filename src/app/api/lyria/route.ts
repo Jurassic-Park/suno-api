@@ -32,7 +32,10 @@ export async function POST(req: NextRequest) {
         }
       });
     }
-  } else {
+  }
+}
+
+export async function GET(req: Request) {
     // 反回文件流
     const url = new URL(req.url);
     const filename = url.searchParams.get('filename');
@@ -68,9 +71,7 @@ export async function POST(req: NextRequest) {
         }
       });
     }
-  }
 }
-
 
 export async function OPTIONS(request: Request) {
   return new Response(null, {
