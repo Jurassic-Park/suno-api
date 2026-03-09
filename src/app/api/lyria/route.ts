@@ -1,62 +1,18 @@
 import { NextResponse, NextRequest } from "next/server";
 import { corsHeaders } from "@/lib/utils";
 import fs from "fs";
-import { GoogleGenAI } from "@google/genai";
-import { Buffer } from "buffer";
+import { lyriaRealtime } from "@/lib/googleGenai";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
-  if (req.method === 'POST') {
     try {
       const body = await req.json();
       const { prompt } = body;
 
-      const client = new GoogleGenAI({
-        apiKey: process.env.GOOGLE_GENAI_API_KEY || "",
-        apiVersion: "v1alpha" ,
-      });
+      lyriaRealtime(prompt).catch(console.error);
 
-      const session = await client.live.music.connect({
-        model: "models/lyria-realtime-exp",
-        callbacks: {
-          onmessage: (message) => {
-            console.log("Received message:", message);
-            if (message.serverContent?.audioChunks) {
-              for (const chunk of message.serverContent.audioChunks) {
-                const mt = chunk.mimeType; 
-                console.log("Received audio chunk with MIME type:", mt);
-                if (chunk.data) {
-                  console.log("Chunk data length (base64):", chunk.data.length);
-                  const audioBuffer = Buffer.from(chunk.data, "base64");
-                  fs.writeFileSync("output.raw", audioBuffer); // Save raw audio for debugging
-                }
-                // speaker.write(audioBuffer);
-              }
-            }
-          },
-          onerror: (error) => console.error("music session error:", error),
-          onclose: () => console.log("Lyria RealTime stream closed."),
-        },
-      });
-
-      await session.setWeightedPrompts({
-        weightedPrompts: [
-          { text: prompt, weight: 1.0 },
-        ],
-      });
-
-      await session.setMusicGenerationConfig({
-        musicGenerationConfig: {
-          bpm: 90,
-          temperature: 1.0,
-          // audioFormat: "pcm16",  // important so we know format
-          // sampleRateHz: 44100,
-        },
-      });
-
-      session.play();
-      
+      console.log("Music generation started with prompt:", prompt);
       try {
         // Wait for the session to complete or set a timeout
         await new Promise((resolve, reject) => {
@@ -76,9 +32,9 @@ export async function POST(req: NextRequest) {
           ...corsHeaders
         }
       });
-    } catch (error: any) {
-      console.error('Error upload:', error);
-      return new NextResponse(JSON.stringify({ error: 'Internal server error: ' + error }), {
+    } catch (error) {
+      console.error('Error processing request:', error);
+      return new NextResponse(JSON.stringify({ error: 'Internal Server Error' }), {
         status: 500,
         headers: {
           'Content-Type': 'application/json',
@@ -86,10 +42,10 @@ export async function POST(req: NextRequest) {
         }
       });
     }
-  }
 }
 
 export async function GET(req: Request) {
+    fs.writeFileSync("/tmp/output.raw", "999999999999"); // Save raw audio for debugging
     // 反回文件流
     const url = new URL(req.url);
     const filename = url.searchParams.get('filename');
